@@ -168,13 +168,20 @@ static void probe() {
             s_probe = same ? "ok: written and read back" : "read kind " + std::to_string((int)o.kind);
         });
     });
-    cliPrintf("probe %s\n", ok ? "queued" : "refused");
+    if (!ok) s_probe = "refused";
+}
+
+// Commands reach the kq task as storage keys, since its ITS handles are its own.
+static void onCmdProbe(const char* key, const char* val) {
+    if (!val || !*val) return;
+    storageUnset(key);
+    probe();
 }
 
 static void cliKq(const char* args) {
     std::string a = args ? args : "";
     if (!s_task) { cliPrintf("kq: not started (rnsd is not up yet)\n"); return; }
-    if (a == "probe") { probe(); return; }
+    if (a == "probe") { storageSet("kq.cmd.probe", "1"); cliPrintf("probe queued; `kq` shows the result\n"); return; }
     cliPrintf("replicas heard: %u\n", (unsigned)s_replicas.size());
     for (auto& [d, r] : s_replicas) cliPrintf("  %s hops %d flags %d\n", d.c_str(), r.hops, r.flags);
     cliPrintf("channel: %s %s\n", s_chanDest.empty() ? "-" : s_chanDest.c_str(),
@@ -191,6 +198,7 @@ static void kqTaskMain(void*) {
     if (!itsServerInit()) err("kq itsServerInit failed");
     itsClientInit(4);
     storageSubscribeChanges("rnsd.chan.kq.rep", onChanState);
+    storageSubscribeChanges("kq.cmd.probe", onCmdProbe);
     for (;;) {
         connectAnnounces();
         while (!s_stop) {
