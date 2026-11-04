@@ -80,7 +80,7 @@ Vault::Vault(StoreFiles files) : inner_(std::move(files)) {
         if (inner_.read("state.json.s"))
             set(KqLock::LOST, "the chats are sealed but lock.json, which keeps their key, is gone");
         else
-            set(KqLock::UNDECIDED, inner_.read("state.json") ? "chats from before are kept unencrypted" : "");
+            set(KqLock::UNDECIDED, inner_.read("state.json") ? "Chats you have from before are kept unencrypted; a passphrase seals them." : "");
         return;
     }
     try {

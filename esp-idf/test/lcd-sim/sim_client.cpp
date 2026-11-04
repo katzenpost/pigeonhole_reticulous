@@ -179,7 +179,11 @@ void simClientStart(const std::string& socketPath, const std::string& name, size
     std::thread(kqLoop).detach();
 }
 
-KqLock kqLock(std::string* why) { return g_vault ? g_vault->state(why) : KqLock::STARTING; }
+KqLock kqLock(std::string* why) {
+    KqLock l = g_vault ? g_vault->state(why) : KqLock::STARTING;
+    std::lock_guard<std::mutex> g(g_mu);
+    return l == KqLock::OPEN && !g_store ? KqLock::UNLOCKING : l;
+}
 void kqSetup(const std::string& passphrase) { if (g_vault) g_vault->ask_setup(passphrase); }
 void kqUnlock(const std::string& passphrase) { if (g_vault) g_vault->ask_unlock(passphrase); }
 

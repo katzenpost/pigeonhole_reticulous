@@ -330,6 +330,11 @@ void onChatRow(lv_event_t* e) { openChat(boundString(e)); }
 
 void drawList() {
     if (!s_listBody) return;
+    // The rows are made again: the keys keep their place on the same row, and focus left on
+    // something no longer shown comes to the first.
+    lv_group_t* grp = lcdInputGroup();
+    lv_obj_t* f = grp ? lv_group_get_focused(grp) : nullptr;
+    int at = f && lv_obj_get_parent(f) == s_listBody ? (int)lv_obj_get_index(f) : f && lv_obj_is_visible(f) ? -1 : 0;
     lv_obj_clean(s_listBody);
     auto chats = kqChats();
     lv_label_set_text(g_listHdr.title, "Group chat");
@@ -349,6 +354,10 @@ void drawList() {
         mkLabel(r, statusOf(c), !c.voucher.empty() ? C_AMBER : C_SUB, kSmall);
         bindString(r, onChatRow, c.id);
     }
+    if (at < 0 || !grp) return;
+    uint32_t n = lv_obj_get_child_count(s_listBody);
+    lv_obj_t* r = n ? lv_obj_get_child(s_listBody, std::min<int>(at, (int)n - 1)) : nullptr;
+    if (r && lv_obj_get_group(r)) lv_group_focus_obj(r);
 }
 
 void onNewGroup(lv_event_t*) {

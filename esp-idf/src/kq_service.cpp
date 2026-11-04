@@ -341,7 +341,11 @@ std::vector<KqChat> kqChats(const std::string& only, bool lines) {
     return out;
 }
 
-KqLock kqLock(std::string* why) { return s_vault ? s_vault->state(why) : KqLock::STARTING; }
+// Open only once the chats are loaded, so that a screen never shows them empty in between.
+KqLock kqLock(std::string* why) {
+    KqLock l = s_vault ? s_vault->state(why) : KqLock::STARTING;
+    return l == KqLock::OPEN && !s_store ? KqLock::UNLOCKING : l;
+}
 void kqSetup(const std::string& passphrase) { if (s_vault) { s_vault->ask_setup(passphrase); wake(); } }
 void kqUnlock(const std::string& passphrase) { if (s_vault) { s_vault->ask_unlock(passphrase); wake(); } }
 
