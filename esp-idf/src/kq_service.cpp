@@ -86,6 +86,7 @@ static bool s_chanUp = false;
 static uint32_t s_chanClosedAt = 0;
 
 static kq::ReplicaClient* s_client = nullptr;
+static TaskHandle_t s_task = nullptr;
 static unsigned s_sent = 0, s_sendFail = 0, s_recv = 0;
 static std::string s_probe = "-";
 
@@ -172,6 +173,7 @@ static void probe() {
 
 static void cliKq(const char* args) {
     std::string a = args ? args : "";
+    if (!s_task) { cliPrintf("kq: not started (rnsd is not up yet)\n"); return; }
     if (a == "probe") { probe(); return; }
     cliPrintf("replicas heard: %u\n", (unsigned)s_replicas.size());
     for (auto& [d, r] : s_replicas) cliPrintf("  %s hops %d flags %d\n", d.c_str(), r.hops, r.flags);
@@ -183,7 +185,6 @@ static void cliKq(const char* args) {
 
 // ---- task ----
 
-static TaskHandle_t s_task = nullptr;
 static volatile bool s_stop = false, s_parked = false;
 
 static void kqTaskMain(void*) {
@@ -209,7 +210,6 @@ static void kqTaskMain(void*) {
 static void kqStart() {
     s_stop = false;
     if (sodium_init() < 0) { err("kq: sodium_init failed"); return; }
-    if (!s_client) s_client = new kq::ReplicaClient((size_t)storageGetInt("s.kq.box_size", 1549), sendFrame);
     if (!s_task) s_task = spawnTask(kqTaskMain, TAG, 16384, nullptr, 1, 1, STACK_PSRAM);
     else xTaskNotifyGive(s_task);
 }
@@ -225,6 +225,7 @@ void KqService::onInit() {
     storageBegin();
     storageDefault("s.kq.box_size", 1549);
     storageEnd();
+    s_client = new kq::ReplicaClient((size_t)storageGetInt("s.kq.box_size", 1549), sendFrame);
     cliRegisterCmd("kq", cliKq);
     rnsServiceRegister(TAG, kqStart, kqStop);
 }
