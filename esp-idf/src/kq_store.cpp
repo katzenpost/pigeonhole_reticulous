@@ -139,10 +139,11 @@ bool Store::save_log(const Chat& c) {
 kq1::State Store::load(const std::string& me, std::vector<std::string>* problems) {
     State st{me, {}};
     auto note = [&](const std::string& p) { if (problems) problems->push_back(p); };
-    auto meta = f_.read("state.json");
-    if (!meta) return st;
+    std::optional<std::string> meta;
     std::vector<std::string> order;
     try {
+        meta = f_.read("state.json");
+        if (!meta) return st;
         Json m = Json::parse(*meta);
         st.me = str(get(m, "me"));
         for (auto& id : arr(get(m, "order"))) order.push_back(str(id));
@@ -153,18 +154,20 @@ kq1::State Store::load(const std::string& me, std::vector<std::string>* problems
     meta_ = *meta;
     for (auto& id : order) {
         std::string b = base(id);
-        auto rec = f_.read(b + ".json");
-        if (!rec) { note(id + ": no record"); continue; }
+        std::optional<std::string> rec;
+        std::string log;
         Chat c;
         try {
+            rec = f_.read(b + ".json");
+            if (!rec) { note(id + ": no record"); continue; }
             c = chat_of(Json::parse(*rec));
+            log = f_.read(b + ".log").value_or("");
         } catch (const std::exception& e) {
             note(id + ": " + e.what());
             continue;
         }
         std::map<size_t, Line> lines;
         size_t n = 0;
-        auto log = f_.read(b + ".log").value_or("");
         for (size_t p = 0; p < log.size();) {
             size_t q = log.find('\n', p);
             if (q == std::string::npos) break;  // cut short as it was written: the step it was in is redone
@@ -235,6 +238,28 @@ bool Store::commit(const kq1::State& st, const kq1::Changes& ch) {
         else ok = false;
     }
     return ok;
+}
+
+bool Store::save_all(const kq1::State& st) {
+    bool ok = true;
+    for (auto& c : st.chats) {
+        std::string rec = chat_json(c).dump();
+        ok &= put(base(c.id) + ".json", rec, true);
+        saved_[c.id] = rec;
+        ok &= save_log(c);
+    }
+    std::vector<Json> order;
+    for (auto& c : st.chats) order.push_back(Json::str(c.id));
+    meta_ = Json::obj({{"me", Json::str(st.me)}, {"order", Json::arr(order)}}).dump();
+    return ok && put("state.json", meta_, true);
+}
+
+void Store::erase(const kq1::State& st) {
+    for (auto& c : st.chats) {
+        f_.remove(base(c.id) + ".json");
+        f_.remove(base(c.id) + ".log");
+    }
+    f_.remove("state.json");
 }
 
 StoreFiles memory_files(std::map<std::string, std::string>& files) {
