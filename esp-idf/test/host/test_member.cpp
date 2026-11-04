@@ -250,9 +250,9 @@ static std::optional<std::string> diff(const std::string& path, const Json& ours
 // ---- reading traces ----
 
 struct Bad : std::runtime_error { using std::runtime_error::runtime_error; };
-static const Json& get(const Json& j, const std::string& k) {
+static const Json& get(const Json& j, const char* k) {
     auto it = j.o.find(k);
-    if (j.kind != Json::OBJ || it == j.o.end()) throw Bad("no field " + k);
+    if (j.kind != Json::OBJ || it == j.o.end()) throw Bad(std::string("no field ") + k);
     return it->second;
 }
 static Bytes b(const Json& j) {
