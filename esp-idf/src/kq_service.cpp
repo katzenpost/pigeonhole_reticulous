@@ -272,8 +272,8 @@ static void printChats(const std::string& only, bool lines) {
         for (auto& l : c.log) {
             if (l.notice) { cliPrintf("  — %s\n", kq1::plain(*l.notice).c_str()); continue; }
             bool mine = c.group && c.group->me() == l.sender;
-            auto n = c.names.find(l.sender);
-            std::string who = mine ? "me" : n != c.names.end() ? n->second : "?";
+            const std::string* n = c.names.get(l.sender);
+            std::string who = mine ? "me" : n ? *n : "?";
             const char* mark = !mine ? "" : l.status == kq1::Status::Pending ? " …" : c.acknowledged(l) ? " ✓✓" : " ✓";
             cliPrintf("  %s%s: %s\n", who.c_str(), mark, l.text.c_str());
         }
