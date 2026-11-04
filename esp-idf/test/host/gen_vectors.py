@@ -17,9 +17,14 @@ out = []
 for path in sys.argv[1:]:
     tag = os.path.relpath(path, os.path.dirname(os.path.abspath(__file__))).replace("vectors/", "")
     doc = json.load(open(path))
-    vectors = doc["vectors"] if isinstance(doc, dict) and "vectors" in doc else doc
-    for i, v in enumerate(vectors):
+    if isinstance(doc, dict) and "vectors" in doc:
+        vectors = [(str(v.get("name", i)), v) for i, v in enumerate(doc["vectors"])]
+    elif isinstance(doc, dict):  # one vector per section, named by it
+        vectors = [(k, v) for k, v in doc.items() if isinstance(v, dict)]
+    else:
+        vectors = [(str(i), v) for i, v in enumerate(doc)]
+    for name, v in vectors:
         fields = [f"{k}={flat(x)}" for k, x in v.items()]
-        assert not any("\t" in f or "\n" in f for f in fields), (path, i)
-        out.append("\t".join([tag, str(v.get("name", i))] + fields))
+        assert not any("\t" in f or "\n" in f for f in fields), (path, name)
+        out.append("\t".join([tag, name] + fields))
 print("\n".join(out))
