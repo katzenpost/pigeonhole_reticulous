@@ -86,12 +86,16 @@ static bool s_chanUp = false;
 static uint32_t s_chanClosedAt = 0;
 
 static kq::ReplicaClient* s_client = nullptr;
+static unsigned s_sent = 0, s_sendFail = 0, s_recv = 0;
+static std::string s_probe = "-";
 
 static bool sendFrame(const kq::Bytes& frame) {
     if (s_chan < 0) return false;
     kq::Bytes m{(uint8_t)(kq::wire::kMsgType >> 8), (uint8_t)kq::wire::kMsgType};
     m.insert(m.end(), frame.begin(), frame.end());
-    return itsSend(s_chan, m.data(), m.size(), pdMS_TO_TICKS(1000)) == m.size();
+    bool ok = itsSend(s_chan, m.data(), m.size(), pdMS_TO_TICKS(1000)) == m.size();
+    ok ? s_sent++ : s_sendFail++;
+    return ok;
 }
 
 static void onChanRecv(int handle, size_t) {
@@ -101,6 +105,7 @@ static void onChanRecv(int handle, size_t) {
         size_t n = itsRecv(handle, buf, sizeof buf, 0);
         if (n == 0) return;
         if (n < 2 || ((uint16_t)(buf[0] << 8 | buf[1])) != kq::wire::kMsgType) continue;
+        s_recv++;
         s_client->on_message(buf + 2, n - 2, nowMs());
     }
 }
@@ -153,12 +158,13 @@ static void probe() {
     });
     kq::Bytes text{'k', 'q', ' ', 'p', 'r', 'o', 'b', 'e'};
     auto r = w.read_cap();
+    s_probe = "writing";
     bool ok = s_client->write(w, w.index, text, [r, text](uint8_t code) {
-        info("kq: probe write: code %d", code);
+        s_probe = "write code " + std::to_string(code);
         if (code != kq::wire::SUCCESS) return;
         s_client->read(r.root_pk, r.index, [text](const kq::ReadOutcome& o) {
             bool same = o.kind == kq::ReadOutcome::FOUND && o.plaintext == text;
-            info("kq: probe read: %s", same ? "ok, the box reads back" : "FAILED");
+            s_probe = same ? "ok: written and read back" : "read kind " + std::to_string((int)o.kind);
         });
     });
     cliPrintf("probe %s\n", ok ? "queued" : "refused");
@@ -172,6 +178,7 @@ static void cliKq(const char* args) {
     cliPrintf("channel: %s %s\n", s_chanDest.empty() ? "-" : s_chanDest.c_str(),
               s_chan < 0 ? "closed" : s_chanUp ? "up" : "opening");
     cliPrintf("requests pending: %u, box size %u\n", (unsigned)s_client->pending(), (unsigned)s_client->box_size());
+    cliPrintf("frames sent %u, refused %u, received %u; probe: %s\n", s_sent, s_sendFail, s_recv, s_probe.c_str());
 }
 
 // ---- task ----
