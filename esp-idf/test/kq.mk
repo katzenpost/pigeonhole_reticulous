@@ -42,7 +42,8 @@ $(B)/sodium/%.o: $(SODIUM_SRC)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(B)/ctidh/%.o: $(CTIDH)/%.c
+# kq.mk holds the field choice and the *_ref renames: objects built before a change to it are stale.
+$(B)/ctidh/%.o: $(CTIDH)/%.c $(ROOT)/test/kq.mk
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -fwrapv $(CTIDH_DEFS) $(if $(findstring fiat_p1024.c,$<),$(FIAT_REF)) -I$(CTIDH)/highctidh -I$(SODIUM_SRC)/include -w -c $< -o $@
 

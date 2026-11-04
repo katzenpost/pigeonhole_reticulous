@@ -15,5 +15,5 @@ $(B)/%: %.cpp vectors.h $(KQ_O) $(SODIUM_O) $(CTIDH_O)
 	$(CXX) $(CXXFLAGS) $< $(KQ_O) $(SODIUM_O) $(CTIDH_O) -o $@ $(LDLIBS)
 
 clean:
-	rm -rf build build-noint128
+	rm -rf build build-*
 .PHONY: all clean
