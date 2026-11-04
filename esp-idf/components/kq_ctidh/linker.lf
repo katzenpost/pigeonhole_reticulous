@@ -1,0 +1,5 @@
+# The field runs from IRAM: from flash, every call would wait on the instruction cache.
+[mapping:kq_ctidh]
+archive: libkq_ctidh.a
+entries:
+    fp1024_mont32 (noflash)
