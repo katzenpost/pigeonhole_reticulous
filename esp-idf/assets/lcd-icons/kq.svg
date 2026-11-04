@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"
+     stroke="#eef3f8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Group chat: two speech bubbles overlapping, the front one closed by a small lock shackle. -->
+  <path d="M8 14 H38 A4 4 0 0 1 42 18 V34 A4 4 0 0 1 38 38 H20 L12 45 V38 H8 A4 4 0 0 1 4 34 V18 A4 4 0 0 1 8 14 Z"/>
+  <path d="M46 24 H56 A4 4 0 0 1 60 28 V44 A4 4 0 0 1 56 48 H52 V55 L44 48 H30 A4 4 0 0 1 26 44 V42"/>
+  <path d="M18 26 V23 A5 5 0 0 1 28 23 V26"/>
+  <rect x="15" y="26" width="16" height="7" rx="1.5"/>
+</svg>

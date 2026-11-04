@@ -10,6 +10,7 @@ namespace kq {
 // ---- Runtime ----
 
 void Runtime::release(const kq1::StepResult& r) {
+    steps++;
     for (auto& a : r.actions) ready_.push_back(a);
     if (on_changes && !r.changes.empty()) on_changes(r.changes);
 }

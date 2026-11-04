@@ -13,3 +13,5 @@ requires:
   - reticulous/rns
 services:
   - { class: KqService, header: kq_service.h }
+  # KqApp is the launcher tile, compiled only when the lcd straddle is staged (conditional/spangap-lcd/).
+  - { class: KqApp, header: kq_app.h, when: spangap/spangap-lcd }
