@@ -259,18 +259,10 @@ static void onCmd(const char* key, const char* val) {
     if (verb == "probe") { probe(); return; }
     size_t bar = v.find('|');
     std::string group = v.substr(0, bar), arg = bar == std::string::npos ? "" : v.substr(bar + 1);
-    static const std::map<std::string, kq1::Input::Kind> kinds = {
-        {"create", kq1::Input::CREATE}, {"join", kq1::Input::JOIN},   {"invite", kq1::Input::INDUCT},
-        {"send", kq1::Input::SEND},     {"scan", kq1::Input::SCAN},   {"leave", kq1::Input::LEAVE}};
-    auto k = kinds.find(verb);
-    if (k == kinds.end()) return;
-    kq1::Input in(k->second);
-    in.chat = group;
-    in.name = group;
-    in.code = arg;
-    in.text = arg;
+    auto in = kq::input_of(verb, group, arg);
+    if (!in) return;
     xSemaphoreTake(s_mu, portMAX_DELAY);
-    s_rt->input(nowS(), nowMs(), in);
+    s_rt->input(nowS(), nowMs(), *in);
     xSemaphoreGive(s_mu);
 }
 
@@ -282,35 +274,7 @@ std::vector<KqChat> kqChats(const std::string& only, bool lines) {
     std::vector<KqChat> out;
     if (!s_mu || !s_rt) return out;
     xSemaphoreTake(s_mu, portMAX_DELAY);
-    for (auto& c : s_rt->eng.state.chats) {
-        if (!only.empty() && c.id != only) continue;
-        KqChat k;
-        k.id = c.id;
-        k.joined = c.group.has_value();
-        k.adding = c.inducting.has_value();
-        if (c.joining) k.voucher = c.joining->code.empty() ? "\xE2\x80\xA6" : c.joining->code;
-        k.members = c.group ? (unsigned)c.group->readers.size() : 0;
-        k.pending = (unsigned)c.jobs.size();
-        if (lines) {
-            for (auto& l : c.log) {
-                KqLine x;
-                if (l.notice) {
-                    x.notice = true;
-                    x.text = kq1::plain(*l.notice);
-                } else {
-                    x.mine = c.group && c.group->me() == l.sender;
-                    const std::string* n = c.names.get(l.sender);
-                    x.who = x.mine ? "me" : n ? *n : "?";
-                    x.text = l.text;
-                    if (x.mine)
-                        x.mark = l.status == kq1::Status::Pending ? KqLine::PENDING
-                               : c.acknowledged(l) ? KqLine::READ : KqLine::WRITTEN;
-                }
-                k.lines.push_back(std::move(x));
-            }
-        }
-        out.push_back(std::move(k));
-    }
+    out = kq::chats(s_rt->eng.state, only, lines);
     xSemaphoreGive(s_mu);
     return out;
 }

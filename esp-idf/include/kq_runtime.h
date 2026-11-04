@@ -10,6 +10,7 @@
 
 #include "kq1_engine.h"
 #include "kq_replica.h"
+#include "kq_view.h"
 
 namespace kq {
 
@@ -68,5 +69,10 @@ private:
     // The seal public key of each secret key minted here, so opening a reply costs no CTIDH action.
     std::map<Bytes, Bytes> seal_pub_;
 };
+
+// The chats as the screens show them: every one, or only `only`; with lines when `lines`.
+std::vector<KqChat> chats(const kq1::State& st, const std::string& only, bool lines);
+// A command's verb and arguments as the engine's input; nothing for an unknown verb.
+std::optional<kq1::Input> input_of(const std::string& verb, const std::string& group, const std::string& arg);
 
 }  // namespace kq
