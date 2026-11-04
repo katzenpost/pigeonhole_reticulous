@@ -44,6 +44,20 @@ Keypair generate(const Rng& rng) {
     return k;
 }
 
+Bytes public_of(const Bytes& priv) {
+    if (priv.size() != kPrivateKeySize) return {};
+    Bytes pub(kPublicKeySize);
+    crypto_scalarmult_curve25519_base(pub.data(), priv.data());
+    private_key sk;
+    public_key pk;
+    memcpy(&sk, priv.data() + 32, sizeof sk);
+    bool ok = csidh(&pk, &base, &sk);
+    sodium_memzero(&sk, sizeof sk);
+    if (!ok) return {};
+    memcpy(pub.data() + 32, &pk, sizeof pk);
+    return pub;
+}
+
 bool valid_public(const Bytes& pub) {
     if (pub.size() != kPublicKeySize) return false;
     public_key pk;

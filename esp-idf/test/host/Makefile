@@ -30,7 +30,7 @@ CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -fsanitize=address,undefined \
 	-I$(ROOT)/include -I$(SODIUM_SRC)/include -I$(CTIDH)/highctidh $(CTIDH_DEFS) $(MBED_INC)
 LDLIBS := $(MBED_LIB) -lmbedcrypto -fsanitize=address,undefined
 
-TESTS := test_bacap test_nike test_wire test_kq1 test_voucher test_replica test_member test_client
+TESTS := test_bacap test_nike test_wire test_kq1 test_voucher test_replica test_member test_client test_runtime
 
 all: $(addprefix $(B)/,$(TESTS)) $(B)/vectors.txt
 	@for t in $(TESTS); do $(B)/$$t $(B)/vectors.txt || exit 1; done

@@ -31,6 +31,8 @@ struct Keypair {
 // Reads the X25519 key's 32 bytes, then the CTIDH key's.
 Keypair generate(const Rng& rng);
 std::optional<Bytes> derive_secret(const Bytes& priv, const Bytes& pub);
+// The public key of a private key: one X25519 and one CTIDH action. Empty when malformed.
+Bytes public_of(const Bytes& priv);
 bool valid_public(const Bytes& pub);
 
 // hpqc protocols/sealedbox: ephemeral public key, then XSalsa20-Poly1305.
