@@ -4,7 +4,7 @@
 #include <optional>
 #include <string>
 
-#include "kq_cbor.h"
+#include "kq1_wire.h"
 #include "kq_crypto.h"
 
 namespace kq::nike {

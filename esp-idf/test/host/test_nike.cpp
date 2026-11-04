@@ -13,8 +13,6 @@ extern "C" {
 
 using namespace kq;
 
-static Bytes str(const std::string& s) { return Bytes(s.begin(), s.end()); }
-
 int main(int, char** argv) {
     const char* path = argv[1];
     if (sodium_init() < 0) return 2;
@@ -96,11 +94,12 @@ int main(int, char** argv) {
         auto again = v2 ? nike::seal(kp.pub, pt->data(), pt->size(), ss.rng())
                         : nike::mkem_encapsulate(kp.pub, pt->data(), pt->size(), ss.rng());
         check(again == sealed, induct, "reseal from seal_seed");
-        cbor::Value reply;
-        check(cbor::decode(pt->data(), pt->size(), reply), induct, "reply is CBOR");
-        auto who = v2 ? (reply.isArray() && reply.items.size() == 2 ? &reply.items[0] : nullptr)
-                      : reply.atText("WhoReply");
-        check(who && str(who->s) == in.hex("who_reply"), induct, "who_reply inside");
+        auto reply = kq1::Term::read(pt->data(), pt->size());
+        check(reply.has_value(), induct, "reply is CBOR");
+        if (!reply) continue;
+        auto who = v2 ? (reply->kind == kq1::Term::LIST && reply->items.size() == 2 ? &reply->items[0] : nullptr)
+                      : reply->field("WhoReply");
+        check(who && who->bytes == in.hex("who_reply"), induct, "who_reply inside");
     }
     return finish("nike");
 }

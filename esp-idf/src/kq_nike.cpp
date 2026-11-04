@@ -131,7 +131,7 @@ static Bytes aead_seal(const uint8_t key[32], const uint8_t* pt, size_t len, con
     return out;
 }
 
-static std::optional<Bytes> aead_open(const uint8_t key[32], const std::string& ct) {
+static std::optional<Bytes> aead_open(const uint8_t key[32], const Bytes& ct) {
     if (ct.size() < 12 + 16) return std::nullopt;
     const uint8_t* p = (const uint8_t*)ct.data();
     Bytes pt(ct.size() - 12 - 16);
@@ -153,33 +153,35 @@ Bytes mkem_encapsulate(const Bytes& recipient_pub, const uint8_t* pt, size_t len
     sodium_memzero(msg_key, sizeof msg_key);
     sodium_memzero(secret->data(), secret->size());
     // Canonical CBOR orders the keys by length.
-    cbor::Writer w;
-    w.map(3);
-    w.text("Envelope");
-    w.bytes(envelope.data(), envelope.size());
-    w.text("DEKCiphertexts");
-    w.array(1);
-    w.bytes(dek.data(), dek.size());
-    w.text("EphemeralPublicKey");
-    w.bytes(eph.pub.data(), eph.pub.size());
-    return w.out;
+    Bytes out;
+    kq1::push_header(out, 5, 3);
+    kq1::push_text(out, "Envelope");
+    kq1::push_bytes(out, envelope);
+    kq1::push_text(out, "DEKCiphertexts");
+    kq1::push_header(out, 4, 1);
+    kq1::push_bytes(out, dek);
+    kq1::push_text(out, "EphemeralPublicKey");
+    kq1::push_bytes(out, eph.pub);
+    return out;
 }
 
 std::optional<Bytes> mkem_decapsulate(const Bytes& priv, const uint8_t* ct, size_t len) {
-    cbor::Value v;
-    if (!cbor::decode(ct, len, v) || !v.isMap()) return std::nullopt;
-    auto* eph = v.atText("EphemeralPublicKey");
-    auto* deks = v.atText("DEKCiphertexts");
-    auto* env = v.atText("Envelope");
-    if (!eph || !eph->isBytes() || !deks || !deks->isArray() || !env || !env->isBytes()) return std::nullopt;
-    auto secret = mkem_secret(priv, Bytes(eph->s.begin(), eph->s.end()));
+    auto v = kq1::Term::read(ct, len);
+    if (!v) return std::nullopt;
+    auto* eph = v->field("EphemeralPublicKey");
+    auto* deks = v->field("DEKCiphertexts");
+    auto* env = v->field("Envelope");
+    using T = kq1::Term;
+    if (!eph || eph->kind != T::BYTES || !deks || deks->kind != T::LIST || !env || env->kind != T::BYTES)
+        return std::nullopt;
+    auto secret = mkem_secret(priv, eph->bytes);
     if (!secret) return std::nullopt;
     std::optional<Bytes> out;
     for (auto& d : deks->items) {
-        if (!d.isBytes()) continue;
-        auto msg_key = aead_open(secret->data(), d.s);
+        if (d.kind != T::BYTES) continue;
+        auto msg_key = aead_open(secret->data(), d.bytes);
         if (!msg_key || msg_key->size() != 32) continue;
-        out = aead_open(msg_key->data(), env->s);
+        out = aead_open(msg_key->data(), env->bytes);
         sodium_memzero(msg_key->data(), msg_key->size());
         break;
     }
