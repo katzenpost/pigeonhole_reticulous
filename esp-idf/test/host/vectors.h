@@ -68,6 +68,9 @@ struct Json {
     std::map<std::string, Json> o;
 
     static Json num(unsigned long long v) { Json j; j.kind = NUM; j.s = std::to_string(v); return j; }
+    static Json neg(long long v) { Json j; j.kind = NUM; j.s = std::to_string(v); return j; }
+    static Json boolean(bool v) { Json j; j.kind = BOOL; j.s = v ? "true" : "false"; return j; }
+    bool b() const { return kind == BOOL && s == "true"; }
     static Json str(const std::string& v) { Json j; j.kind = STR; j.s = v; return j; }
     static Json arr(std::vector<Json> v) { Json j; j.kind = ARR; j.a = std::move(v); return j; }
     static Json obj(std::map<std::string, Json> v) { Json j; j.kind = OBJ; j.o = std::move(v); return j; }
