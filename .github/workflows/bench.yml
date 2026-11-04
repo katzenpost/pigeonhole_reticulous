@@ -1,0 +1,86 @@
+# The benchmarks of esp-idf/test/bench, only when code whose speed they measure changes on
+# main, or when asked for (Actions → benchmarks → Run workflow). The tables land on the run's
+# summary page and as an artifact. A shared runner's times are noisy and are not a device's:
+# read the order, and the gaps between operations.
+name: benchmarks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'esp-idf/components/**'
+      - 'esp-idf/include/**'
+      - 'esp-idf/src/kq_crypto.cpp'
+      - 'esp-idf/src/kq_nike.cpp'
+      - 'esp-idf/src/kq_bacap.cpp'
+      - 'esp-idf/src/kq_wire.cpp'
+      - 'esp-idf/src/kq1_wire.cpp'
+      - 'esp-idf/src/kq1_voucher.cpp'
+      - 'esp-idf/src/kq_replica.cpp'
+      - 'esp-idf/src/kq_store.cpp'
+      - 'esp-idf/src/kq_vault.cpp'
+      - 'esp-idf/src/kq_json.cpp'
+      - 'esp-idf/src/kq1_trace.cpp'
+      - 'esp-idf/test/bench/**'
+      - 'esp-idf/test/kq.mk'
+      - '.github/workflows/bench.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MBEDTLS_VERSION: 3.6.7
+  MBEDTLS_SHA256: a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        int128: ['1', '0']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: mbedTLS from the cache
+        id: mbedtls
+        uses: actions/cache@v4
+        with:
+          path: ~/mbedtls
+          key: mbedtls-${{ env.MBEDTLS_VERSION }}-${{ runner.os }}
+
+      - name: mbedTLS, built when not cached
+        if: steps.mbedtls.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/src && cd ~/src
+          curl -sSfL -o mbedtls.tar.bz2 "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$MBEDTLS_VERSION/mbedtls-$MBEDTLS_VERSION.tar.bz2"
+          echo "$MBEDTLS_SHA256  mbedtls.tar.bz2" | sha256sum -c -
+          tar xjf mbedtls.tar.bz2
+          cmake -S "mbedtls-$MBEDTLS_VERSION" -B build -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/mbedtls" -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build build -j"$(nproc)"
+          cmake --install build
+
+      - name: Build
+        run: make -C esp-idf/test/bench -j"$(nproc)" INT128=${{ matrix.int128 }} MBEDTLS_DIR="$HOME/mbedtls" bench-bin
+
+      - name: Run
+        run: |
+          {
+            echo "# Benchmarks, CTIDH field $([ '${{ matrix.int128 }}' = 0 ] && echo 'without __int128, as on the device' || echo 'with __int128')"
+            echo
+            echo "Runner: $(lscpu | sed -n 's/^Model name: *//p'), ${{ github.sha }}"
+            echo
+            make -s -C esp-idf/test/bench INT128=${{ matrix.int128 }} MBEDTLS_DIR="$HOME/mbedtls" run
+          } > bench.md
+          cat bench.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-int128-${{ matrix.int128 }}
+          path: bench.md
