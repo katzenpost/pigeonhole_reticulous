@@ -6,6 +6,7 @@
 #include "kq_service.h"
 
 #include <cstring>
+#include <functional>
 #include <ctime>
 #include <map>
 #include <string>
@@ -25,6 +26,7 @@
 
 #include <sodium.h>
 
+#include "kq_nike.h"
 #include "kq_replica.h"
 #include "kq_runtime.h"
 #include "kq_store.h"
@@ -369,8 +371,111 @@ static void printChats(const std::string& only, bool lines) {
     }
 }
 
+// ---- kq bench: CTIDH-1024 and its field timed on this core, to compare changes by ----
+extern "C" {
+void fiat_p1024_mul(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
+void fiat_p1024_square(uint64_t o[16], const uint64_t a[16]);
+void fiat_p1024_add(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
+void fiat_p1024_sub(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
+}
+#if __XTENSA__
+#include "eri.h"
+#include "xtensa-debug-module.h"
+#include "xtensa/xt_perf_consts.h"
+// IDF's xtensa_perfmon_init/start/stop/value, from its xtensa component; counting at every
+// interrupt level. The core has two counters, so a run counts two things.
+static void perfStart(uint16_t sel0, uint16_t mask0, uint16_t sel1, uint16_t mask1) {
+    uint16_t sel[2] = {sel0, sel1}, mask[2] = {mask0, mask1};
+    eri_write(ERI_PERFMON_PGM, 0);
+    for (int i = 0; i < 2; i++) {
+        eri_write(ERI_PERFMON_PM0 + i * 4, 0);
+        eri_write(ERI_PERFMON_PMSTAT0 + i * 4, PMSTAT_OVFL);  // sticky; a 1 clears it
+        eri_write(ERI_PERFMON_PMCTRL0 + i * 4, (PMCTRL_TRACELEVEL_MASK << PMCTRL_TRACELEVEL_SHIFT) |
+                                                   ((sel[i] & PMCTRL_SELECT_MASK) << PMCTRL_SELECT_SHIFT) |
+                                                   ((uint32_t)mask[i] << PMCTRL_MASK_SHIFT));
+    }
+    eri_write(ERI_PERFMON_PGM, PGM_PMEN);
+}
+// The counts, or -1 for one that wrapped (32 bits: about 18 s of cycles at 240 MHz).
+static void perfStop(int64_t out[2]) {
+    eri_write(ERI_PERFMON_PGM, 0);
+    for (int i = 0; i < 2; i++)
+        out[i] = (eri_read(ERI_PERFMON_PMSTAT0 + i * 4) & PMSTAT_OVFL) ? -1 : eri_read(ERI_PERFMON_PM0 + i * 4);
+}
+#endif
+
+static TaskHandle_t s_bench = nullptr;
+
+// One field operation 1000 times, each result the next input: once counting cycles and
+// instructions, once the cycles stalled on instruction- and data-cache misses.
+static void benchField(const char* name, const std::function<void(uint64_t*)>& op) {
+    static uint64_t x[16];
+    randombytes_buf(x, sizeof x);
+    x[15] &= (1ull << 59) - 1;  // below 2^1019, so below p
+    int64_t c[4] = {-1, -1, -1, -1};
+    int64_t t0 = esp_timer_get_time();
+#if __XTENSA__
+    perfStart(XTPERF_CNT_CYCLES, XTPERF_MASK_CYCLES, XTPERF_CNT_INSN, XTPERF_MASK_INSN_ALL);
+#endif
+    for (int i = 0; i < 1000; i++) op(x);
+#if __XTENSA__
+    perfStop(c);
+#endif
+    int64_t us = esp_timer_get_time() - t0;
+#if __XTENSA__
+    perfStart(XTPERF_CNT_I_STALL, XTPERF_MASK_I_STALL_CACHE_MISS, XTPERF_CNT_D_STALL, XTPERF_MASK_D_STALL_CACHE_MISS);
+    for (int i = 0; i < 1000; i++) op(x);
+    perfStop(c + 2);
+#endif
+    info("bench: field %-6s x1000 %8lld us | per op: cycles %lld, insns %lld, I-miss stall %lld, D-miss stall %lld",
+         name, (long long)us, c[0] < 0 ? -1 : c[0] / 1000, c[1] < 0 ? -1 : c[1] / 1000,
+         c[2] < 0 ? -1 : c[2] / 1000, c[3] < 0 ? -1 : c[3] / 1000);
+}
+
+// A whole CTIDH-1024 action takes minutes, past the counters' 32 bits: wall time only.
+static void benchAction(const char* name, const std::function<void()>& f) {
+    int64_t t0 = esp_timer_get_time();
+    f();
+    info("bench: %-14s %10.1f s", name, (esp_timer_get_time() - t0) / 1e6);
+}
+
+static void benchMain(void* arg) {
+    bool ctidh = arg != nullptr;
+    pmBoost();
+    static uint64_t y[16];
+    randombytes_buf(y, sizeof y);
+    y[15] &= (1ull << 59) - 1;
+    benchField("mul", [](uint64_t* x) { fiat_p1024_mul(x, x, y); });
+    benchField("square", [](uint64_t* x) { fiat_p1024_square(x, x); });
+    benchField("add", [](uint64_t* x) { fiat_p1024_add(x, x, y); });
+    benchField("sub", [](uint64_t* x) { fiat_p1024_sub(x, x, y); });
+    if (ctidh) {
+        auto rnd = [](uint8_t* p, size_t n) { randombytes_buf(p, n); };
+        kq::nike::Keypair a, b;
+        benchAction("keypair", [&] { a = kq::nike::generate(rnd); });
+        b = kq::nike::generate(rnd);
+        benchAction("shared secret", [&] { kq::nike::derive_secret(a.priv, b.pub); });
+        benchAction("valid_public", [&] { kq::nike::valid_public(b.pub); });
+    }
+    info("bench: done");
+    pmBoostEnd();
+    s_bench = nullptr;
+    killSelf();
+}
+
+// On the heavy worker's core, with its stack.
+static void cliBench(const std::string& what) {
+    if (what != "field" && what != "ctidh") { cliPrintf("kq bench field | ctidh\n"); return; }
+    if (s_bench) { cliPrintf("kq bench: one is running; `log` shows it\n"); return; }
+    s_bench = spawnTask(benchMain, "kq.bench", kHeavyStack, what == "ctidh" ? (void*)1 : nullptr, 1, 1,
+                        STACK_PSRAM);
+    cliPrintf(s_bench ? "kq bench %s: started; the results go to the log\n" : "kq bench %s: no memory for the task\n",
+              what.c_str());
+}
+
 static void cliKq(const char* args) {
     std::string a = args ? args : "";
+    if (a.compare(0, 6, "bench ") == 0 || a == "bench") { cliBench(a.size() > 6 ? a.substr(6) : ""); return; }
     if (!s_task) { cliPrintf("kq: not started (rnsd is not up yet)\n"); return; }
     size_t sp = a.find(' ');
     std::string verb = a.substr(0, sp), rest = sp == std::string::npos ? "" : a.substr(sp + 1);
@@ -404,7 +509,7 @@ static void cliKq(const char* args) {
     if (verb == "log" && !group.empty()) { printChats(group, true); return; }
     if (!a.empty() && verb != "status") {
         cliPrintf("kq [status] | probe | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n"
-                  "   | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
+                  "   | bench field | bench ctidh | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
         return;
     }
     static const char* locks[] = {"starting", "no choice made yet: kq setup none | kq setup passphrase <p>",
