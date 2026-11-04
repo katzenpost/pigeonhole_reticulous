@@ -3,6 +3,7 @@
 // status bar, with the board's keypad and pointer fed from commands on standard input:
 //   type <text> | key enter|esc|tab|backtab|up|down|left|right|bs | click <x> <y> | back
 //   shot <file.png> | sleep <s> | until <text> <s> | dump | quit
+// The chats are saved in --state, which must exist, and loaded from it at start.
 // `until` waits until the chats (as `dump` prints them) contain the text.
 #include <chrono>
 #include <cstdio>
@@ -139,18 +140,19 @@ static std::mutex s_inMu;
 static std::deque<std::string> s_in;
 
 int main(int argc, char** argv) {
-    std::string socketPath, name = "tdeck";
+    std::string socketPath, name = "tdeck", stateDir;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string a = argv[i];
         if (a == "--socket") socketPath = argv[i + 1];
         else if (a == "--name") name = argv[i + 1];
         else if (a == "--fonts") g_fonts = argv[i + 1];
+        else if (a == "--state") stateDir = argv[i + 1];
     }
-    if (socketPath.empty() || g_fonts.empty()) {
-        fprintf(stderr, "usage: kq-sim --socket <relay socket> --fonts <spangap-lcd fonts dir> [--name <name>]\n");
+    if (socketPath.empty() || g_fonts.empty() || stateDir.empty()) {
+        fprintf(stderr, "usage: kq-sim --socket <relay socket> --fonts <spangap-lcd fonts dir> --state <dir> [--name <name>]\n");
         return 2;
     }
-    simClientStart(socketPath, name, 1549);
+    simClientStart(socketPath, name, 1549, stateDir);
 
     lv_init();
     lv_tick_set_cb([]() -> uint32_t {
@@ -254,7 +256,7 @@ int main(int argc, char** argv) {
             untilText = arg.substr(0, k);
             busyUntil = clock() + std::chrono::seconds(atoi(arg.substr(k + 1).c_str()));
         } else if (cmd == "dump") {
-            printf("channel %s\n%s", simChannelUp() ? "up" : "down", dump().c_str());
+            printf("channel %s; saved %s\n%s", simChannelUp() ? "up" : "down", simSaved().c_str(), dump().c_str());
         } else if (cmd == "quit") {
             return 0;
         } else if (!cmd.empty()) {

@@ -2,7 +2,7 @@
 # the chat client behind it talking to a replica through relay.py.
 #   make LVGL_DIR=<lvgl v9.6 checkout> [SPANGAP_LCD=<spangap-lcd straddle>]
 #   python3 relay.py --config <reticulum config dir> --socket kq.sock &
-#   build/kq-sim --socket kq.sock --fonts $(SPANGAP_LCD)/esp-idf/fonts [--name <name>]
+#   build/kq-sim --socket kq.sock --fonts $(SPANGAP_LCD)/esp-idf/fonts --state <dir> [--name <name>]
 include ../kq.mk
 
 SPANGAP_LCD ?= $(ROOT)/../../spangap-lcd

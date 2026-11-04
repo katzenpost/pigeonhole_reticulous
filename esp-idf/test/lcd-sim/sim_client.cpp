@@ -18,6 +18,7 @@
 #include <thread>
 
 #include "kq_runtime.h"
+#include "kq_store.h"
 #include "kq_view.h"
 #include "sim.h"
 
@@ -27,6 +28,7 @@ std::mutex g_mu;  // the runtime and the replica client
 kq::ReplicaClient* g_client;
 kq::Runtime* g_rt;
 kq::ReplicaBackend* g_backend;
+kq::Store* g_store;
 int g_sock = -1;
 bool g_up = false;
 std::string g_path;
@@ -143,15 +145,29 @@ void kqLoop() {
 
 }  // namespace
 
-void simClientStart(const std::string& socketPath, const std::string& name, size_t boxSize) {
+void simClientStart(const std::string& socketPath, const std::string& name, size_t boxSize, const std::string& stateDir) {
     if (sodium_init() < 0) { fprintf(stderr, "sim: sodium_init failed\n"); exit(1); }
     g_path = socketPath;
     g_client = new kq::ReplicaClient(boxSize, sendFrame);
     g_backend = new kq::ReplicaBackend(*g_client, bridge);
     g_rt = new kq::Runtime(kq1::State{name, {}}, boxSize);
+    g_store = new kq::Store(kq::posix_files(stateDir));
+    std::vector<std::string> problems;
+    g_rt->eng.state = g_store->load(name, &problems);
+    for (auto& p : problems) fprintf(stderr, "sim: not loaded: %s\n", p.c_str());
+    fprintf(stderr, "sim: %zu chats loaded\n", g_rt->eng.state.chats.size());
+    g_rt->on_changes = [](const kq1::Changes& ch) {
+        if (!g_store->commit(g_rt->eng.state, ch)) fprintf(stderr, "sim: saving the chats failed\n");
+    };
+    g_rt->resume(nowS());
     std::thread(workerMain, &g_light).detach();
     std::thread(workerMain, &g_heavy).detach();
     std::thread(kqLoop).detach();
+}
+
+std::string simSaved() {
+    std::lock_guard<std::mutex> g(g_mu);
+    return std::to_string(g_store->writes) + " writes, " + std::to_string(g_store->bytes) + " bytes";
 }
 
 bool simChannelUp() {
