@@ -24,6 +24,16 @@ std::optional<kq1::Action> Runtime::take() {
     return a;
 }
 
+std::optional<kq1::Action> Runtime::take_if(const std::function<bool(const kq1::Action&)>& ok) {
+    for (auto it = ready_.begin(); it != ready_.end(); ++it) {
+        if (!ok(*it)) continue;
+        kq1::Action a = std::move(*it);
+        ready_.erase(it);
+        return a;
+    }
+    return std::nullopt;
+}
+
 void Runtime::finished(int64_t now_s, uint64_t now_ms, const kq1::Done& d) {
     switch (d.kind) {
         case kq1::Done::DONE: if (d.input) input(now_s, now_ms, *d.input); break;

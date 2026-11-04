@@ -21,6 +21,8 @@ public:
     void input(int64_t now_s, uint64_t now_ms, const kq1::Input& in);
     void resume(int64_t now_s);
     std::optional<kq1::Action> take();
+    // The first ready action that ok accepts, in order.
+    std::optional<kq1::Action> take_if(const std::function<bool(const kq1::Action&)>& ok);
     void finished(int64_t now_s, uint64_t now_ms, const kq1::Done& d);
     // Releases what has come due: retries still wanted, and deferred inputs.
     void tick(int64_t now_s, uint64_t now_ms);

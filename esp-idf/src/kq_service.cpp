@@ -29,7 +29,9 @@ static constexpr char kAspect[] = "pigeonhole.replica";
 static constexpr char kChanTag[] = "kq.rep";
 static constexpr uint32_t kTickMs = 500, kReopenMs = 10000;
 static constexpr size_t kAnnHeader = 1 + 16 + 16 + 64 + 32;
-static constexpr int kWorkers = 2;
+// CTIDH-1024 peaks near 300 KB of stack (variable-length arrays in the isogeny code), so the
+// actions that run it get a worker of their own; box reads and writes keep a small one.
+static constexpr uint32_t kHeavyStack = 384 * 1024, kLightStack = 32 * 1024;
 
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static int64_t nowS() { return (int64_t)time(nullptr); }
@@ -161,8 +163,17 @@ static void openChannel() {
 static kq::Runtime* s_rt = nullptr;
 static kq::ReplicaBackend* s_backend = nullptr;
 static SemaphoreHandle_t s_mu = nullptr;  // the engine's state, which the CLI reads
-static QueueHandle_t s_actionQ = nullptr, s_doneQ = nullptr, s_bridgeQ = nullptr;
-static int s_idle = kWorkers;
+static QueueHandle_t s_lightQ = nullptr, s_heavyQ = nullptr, s_doneQ = nullptr, s_bridgeQ = nullptr;
+static bool s_lightIdle = true, s_heavyIdle = true;
+
+static bool heavy(const kq1::Action& a) {
+    return a.kind == kq1::Action::MINT || a.kind == kq1::Action::SEAL || a.kind == kq1::Action::AWAIT_REPLY;
+}
+
+struct Finished {
+    kq1::Done done;
+    bool heavy;
+};
 
 struct BridgeReq {
     std::function<void(std::function<void()>)> fn;
@@ -179,14 +190,16 @@ static void bridge(std::function<void(std::function<void()>)> fn) {
     vSemaphoreDelete(sem);
 }
 
-static void workerMain(void*) {
+static void workerMain(void* arg) {
+    bool isHeavy = arg != nullptr;
+    QueueHandle_t q = isHeavy ? s_heavyQ : s_lightQ;
     kq1::Executor x{*s_backend, [](uint64_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }};
     for (;;) {
         kq1::Action* a = nullptr;
-        if (xQueueReceive(s_actionQ, &a, portMAX_DELAY) != pdTRUE || !a) continue;
-        auto* d = new kq1::Done(x.perform(*a));
+        if (xQueueReceive(q, &a, portMAX_DELAY) != pdTRUE || !a) continue;
+        auto* f = new Finished{x.perform(*a), isHeavy};
         delete a;
-        xQueueSend(s_doneQ, &d, portMAX_DELAY);
+        xQueueSend(s_doneQ, &f, portMAX_DELAY);
         wake();
     }
 }
@@ -200,19 +213,21 @@ static void pumpClient() {
         delete r;
     }
     xSemaphoreTake(s_mu, portMAX_DELAY);
-    kq1::Done* d;
-    while (xQueueReceive(s_doneQ, &d, 0) == pdTRUE) {
-        s_rt->finished(nowS(), nowMs(), *d);
-        delete d;
-        s_idle++;
+    Finished* f;
+    while (xQueueReceive(s_doneQ, &f, 0) == pdTRUE) {
+        s_rt->finished(nowS(), nowMs(), f->done);
+        (f->heavy ? s_heavyIdle : s_lightIdle) = true;
+        delete f;
     }
     s_rt->tick(nowS(), nowMs());
-    while (s_idle > 0) {
-        auto a = s_rt->take();
-        if (!a) break;
+    // The runtime hands out the next action of the kind an idle worker takes.
+    while (auto a = s_rt->take_if([](const kq1::Action& x) {
+        return heavy(x) ? s_heavyIdle : s_lightIdle;
+    })) {
+        bool h = heavy(*a);
         auto* p = new kq1::Action(std::move(*a));
-        xQueueSend(s_actionQ, &p, portMAX_DELAY);
-        s_idle--;
+        xQueueSend(h ? s_heavyQ : s_lightQ, &p, portMAX_DELAY);
+        (h ? s_heavyIdle : s_lightIdle) = false;
     }
     xSemaphoreGive(s_mu);
 }
@@ -320,7 +335,8 @@ static void kqTaskMain(void*) {
     itsClientInit(4);
     storageSubscribeChanges("rnsd.chan.kq.rep", onChanState);
     storageSubscribeChanges("kq.cmd.", onCmd);
-    for (int i = 0; i < kWorkers; i++) spawnTask(workerMain, "kq.work", 32768, nullptr, 1, 1, STACK_PSRAM);
+    spawnTask(workerMain, "kq.io", kLightStack, nullptr, 1, 1, STACK_PSRAM);
+    spawnTask(workerMain, "kq.ctidh", kHeavyStack, (void*)1, 1, 1, STACK_PSRAM);
     for (;;) {
         connectAnnounces();
         while (!s_stop) {
@@ -359,9 +375,10 @@ void KqService::onInit() {
     storageEnd();
     s_client = new kq::ReplicaClient((size_t)storageGetInt("s.kq.box_size", 1549), sendFrame);
     s_mu = xSemaphoreCreateMutex();
-    s_actionQ = xQueueCreate(kWorkers, sizeof(kq1::Action*));
-    s_doneQ = xQueueCreate(kWorkers, sizeof(kq1::Done*));
-    s_bridgeQ = xQueueCreate(kWorkers, sizeof(BridgeReq*));
+    s_lightQ = xQueueCreate(1, sizeof(kq1::Action*));
+    s_heavyQ = xQueueCreate(1, sizeof(kq1::Action*));
+    s_doneQ = xQueueCreate(2, sizeof(Finished*));
+    s_bridgeQ = xQueueCreate(2, sizeof(BridgeReq*));
     s_backend = new kq::ReplicaBackend(*s_client, bridge);
     // shortcut: the chat state lives in RAM only; persisting it under /state is the next step.
     s_rt = new kq::Runtime(kq1::State{storageGetStr("s.kq.name", "kq"), {}}, s_client->box_size());
