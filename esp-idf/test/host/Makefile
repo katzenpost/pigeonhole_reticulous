@@ -16,7 +16,7 @@ CTIDH_DEFS := -DBITS=1024 -DCGONUTS -DHIGHCTIDH_PORTABLE=1
 ifeq ($(INT128),0)
 CTIDH_DEFS += -DFIAT_P1024_NO_INT128
 endif
-KQ_SRC := $(wildcard $(ROOT)/src/*.cpp)
+KQ_SRC := $(filter-out $(ROOT)/src/kq_service.cpp,$(wildcard $(ROOT)/src/*.cpp))
 KQ_O := $(patsubst $(ROOT)/src/%.cpp,$(B)/kq/%.o,$(KQ_SRC))
 
 ifdef MBEDTLS_DIR
