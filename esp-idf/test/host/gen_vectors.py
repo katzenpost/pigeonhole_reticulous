@@ -17,7 +17,9 @@ out = []
 for path in sys.argv[1:]:
     tag = os.path.relpath(path, os.path.dirname(os.path.abspath(__file__))).replace("vectors/", "")
     doc = json.load(open(path))
-    if isinstance(doc, dict) and "vectors" in doc:
+    if isinstance(doc, dict) and "queries" in doc:  # pigeonhole_rns bridge vectors: one list per kind
+        vectors = [(k + "/" + v["name"], v) for k in ("queries", "replies", "malformed", "boxes") for v in doc[k]]
+    elif isinstance(doc, dict) and "vectors" in doc:
         vectors = [(str(v.get("name", i)), v) for i, v in enumerate(doc["vectors"])]
     elif isinstance(doc, dict):  # one vector per section, named by it
         vectors = [(k, v) for k, v in doc.items() if isinstance(v, dict)]
