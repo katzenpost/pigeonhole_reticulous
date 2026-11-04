@@ -1,0 +1,7 @@
+CONFIG_IDF_TARGET="esp32s3"
+# One core: under -icount both cores' instructions would advance the clock CCOUNT is read from.
+CONFIG_FREERTOS_UNICORE=y
+# fiat_p1024_mul_ref alone keeps kilobytes of locals.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_ESP_TASK_WDT_EN=n
+CONFIG_ESP_INT_WDT=n
