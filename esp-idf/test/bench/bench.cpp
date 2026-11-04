@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // How long each of the client's operations takes, slowest first, and what the things a user
 // does cost, each as the operations it is made of. Times are of this machine: the order, and
-// the gaps between, are what carry over to a device, not the numbers.
+// the gaps between, are what carry over to a device, not the numbers. Each entry can be run
+// alone: `bench field-mul` runs the names starting so (`bench --list` prints them).
 #include <mbedtls/aes.h>
 #include <sodium.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -34,63 +36,169 @@ static const uint8_t* ctx() { return (const uint8_t*)bacap::kPigeonholeCtx; }
 static constexpr size_t kCtxLen = sizeof bacap::kPigeonholeCtx - 1;
 static void rnd(uint8_t* p, size_t n) { randombytes_buf(p, n); }
 
+extern "C" {
+void __real_fiat_p1024_mul(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
+void __real_fiat_p1024_square(uint64_t o[16], const uint64_t a[16]);
+void __real_fiat_p1024_add(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
+void __real_fiat_p1024_sub(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
+#ifdef KQ_FIELD_REF
+void fiat_p1024_mul_ref(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
+void fiat_p1024_square_ref(uint64_t o[16], const uint64_t a[16]);
+void fiat_p1024_add_ref(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
+void fiat_p1024_sub_ref(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
+#endif
+// The Makefile links with --wrap for these four, so CTIDH's calls are counted here.
+static uint64_t g_ops[4];  // mul, square, add, sub
+void __wrap_fiat_p1024_mul(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]) { g_ops[0]++; __real_fiat_p1024_mul(o, a, b); }
+void __wrap_fiat_p1024_square(uint64_t o[16], const uint64_t a[16]) { g_ops[1]++; __real_fiat_p1024_square(o, a); }
+void __wrap_fiat_p1024_add(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]) { g_ops[2]++; __real_fiat_p1024_add(o, a, b); }
+void __wrap_fiat_p1024_sub(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]) { g_ops[3]++; __real_fiat_p1024_sub(o, a, b); }
+}
+
 struct Result {
     std::string name;
-    double us;
+    double ns, min_ns;  // per operation: median and fastest repetition
     size_t reps;
+    uint64_t ops[4];    // field operations in one call
 };
 static std::vector<Result> g_results;
-static double g_budget = 0.3;  // seconds per operation
+static std::vector<std::string> g_only;  // name prefixes to run; empty runs all
+static bool g_list = false;
 
-// Runs f until the budget is spent (at least 3 times), and keeps the median time of a run.
-static double bench(const std::string& name, const std::function<void()>& f) {
-    std::vector<double> t;
-    auto start = std::chrono::steady_clock::now();
-    do {
-        auto t0 = std::chrono::steady_clock::now();
-        f();
-        t.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
-    } while (t.size() < 3 || std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < g_budget);
-    std::sort(t.begin(), t.end());
-    double med = t[t.size() / 2];
-    g_results.push_back({name, med, t.size()});
-    fprintf(stderr, "  %-44s %12.1f us\n", name.c_str(), med);
-    return med;
+// "field: mul (mont32)" -> "field-mul-mont32": the name a filter matches.
+static std::string slug(const std::string& n) {
+    std::string s;
+    for (unsigned char c : n)
+        if (isalnum(c)) s += (char)tolower(c);
+        else if (!s.empty() && s.back() != '-') s += '-';
+    while (!s.empty() && s.back() == '-') s.pop_back();
+    return s;
+}
+static bool selected(const std::string& name) {
+    if (g_only.empty()) return true;
+    std::string s = slug(name);
+    for (auto& t : g_only) if (s.compare(0, t.size(), t) == 0) return true;
+    return false;
+}
+// Whether a section's setup is needed: some filter could select a name in it.
+static bool section(const std::string& prefix) {
+    if (g_only.empty() || g_list) return true;
+    std::string p = slug(prefix);
+    for (auto& t : g_only) if (p.compare(0, t.size(), t) == 0 || t.compare(0, p.size(), p) == 0) return true;
+    return false;
+}
+
+static double secs(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+static double run(const std::function<void()>& f, size_t n) {
+    auto t0 = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < n; i++) f();
+    return secs(t0);
+}
+
+// Times f: the first call (which also counts its field operations) and doubling batches up to
+// 1 ms warm up, then 5 repetitions of a batch of about 20 ms. A call of 0.1 s or more (a CTIDH
+// action) is timed once, that first call. Only the direction of a change is meant to show.
+static void bench(const std::string& name, const std::function<void()>& f) {
+    if (!selected(name)) return;
+    if (g_list) { printf("%s\n", slug(name).c_str()); return; }
+    Result r{name, 0, 0, 1, {}};
+    uint64_t before[4];
+    memcpy(before, g_ops, sizeof before);
+    double t = run(f, 1);
+    for (int i = 0; i < 4; i++) r.ops[i] = g_ops[i] - before[i];
+    if (t >= 0.1) {
+        r.ns = r.min_ns = t * 1e9;
+    } else {
+        size_t n = 1;
+        while (t < 1e-3) t = run(f, n *= 2);
+        n = std::max<size_t>(1, (size_t)(n * 0.02 / t));
+        std::vector<double> ts;
+        for (int i = 0; i < 5; i++) ts.push_back(run(f, n) * 1e9 / n);
+        std::sort(ts.begin(), ts.end());
+        r.ns = ts[2], r.min_ns = ts[0], r.reps = ts.size();
+    }
+    g_results.push_back(r);
+    fprintf(stderr, "  %-44s %14.1f ns\n", name.c_str(), r.ns);
 }
 
 static double us(const std::string& name) {
-    for (auto& r : g_results) if (r.name == name) return r.us;
-    return 0;
+    for (auto& r : g_results) if (r.name == name) return r.ns / 1e3;
+    return -1;
 }
 
 static std::string fmt(double us) {
     char b[32];
     if (us >= 1e6) snprintf(b, sizeof b, "%.2f s", us / 1e6);
     else if (us >= 1e3) snprintf(b, sizeof b, "%.2f ms", us / 1e3);
-    else snprintf(b, sizeof b, "%.1f µs", us);
+    else if (us >= 1) snprintf(b, sizeof b, "%.1f µs", us);
+    else snprintf(b, sizeof b, "%.1f ns", us * 1e3);
     return b;
+}
+
+// A field element in the Montgomery domain, fully reduced: below 2^1019, so below p.
+static void felem(uint64_t x[16]) {
+    rnd((uint8_t*)x, 128);
+    x[15] &= (1ull << 59) - 1;
 }
 
 int main(int argc, char** argv) {
     if (sodium_init() < 0) return 2;
-    for (int i = 1; i + 1 < argc; i++)
-        if (!strcmp(argv[i], "--budget")) g_budget = atof(argv[i + 1]);
-    fprintf(stderr, "operations:\n");
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--list")) { g_list = true; continue; }
+        // Comma-separated name prefixes, as --list prints the names.
+        std::string a = argv[i];
+        for (size_t p = 0, q; p <= a.size(); p = q + 1) {
+            q = a.find(',', p);
+            if (q == std::string::npos) q = a.size();
+            if (q > p) g_only.push_back(a.substr(p, q - p));
+        }
+    }
+    if (!g_list) fprintf(stderr, "operations:\n");
+
+    // ---- CTIDH-1024's field: each result is the next input, so no call can be dropped ----
+    if (section("field")) {
+        static uint64_t x[16], y[16];
+        felem(x);
+        felem(y);
+        struct Impl {
+            const char* name;
+            void (*mul)(uint64_t*, const uint64_t*, const uint64_t*), (*sq)(uint64_t*, const uint64_t*),
+                (*add)(uint64_t*, const uint64_t*, const uint64_t*), (*sub)(uint64_t*, const uint64_t*, const uint64_t*);
+        };
+        std::vector<Impl> impls = {{KQ_FIELD_NAME, __real_fiat_p1024_mul, __real_fiat_p1024_square,
+                                    __real_fiat_p1024_add, __real_fiat_p1024_sub}};
+#ifdef KQ_FIELD_REF
+        impls.push_back({"fiat ref", fiat_p1024_mul_ref, fiat_p1024_square_ref, fiat_p1024_add_ref, fiat_p1024_sub_ref});
+#endif
+        for (auto& m : impls) {
+            std::string s = std::string(" (") + m.name + ")";
+            bench("field: mul" + s, [&] { m.mul(x, x, y); });
+            bench("field: square" + s, [&] { m.sq(x, x); });
+            bench("field: add" + s, [&] { m.add(x, x, y); });
+            bench("field: sub" + s, [&] { m.sub(x, x, y); });
+        }
+        volatile uint64_t sink = x[0];
+        (void)sink;
+    }
 
     // ---- CTIDH-1024 with X25519: the NIKE under vouchers ----
-    auto kp = nike::generate(rnd);
-    auto kp2 = nike::generate(rnd);
-    bench("nike: keypair (CTIDH-1024 + X25519)", [] { nike::generate(rnd); });
-    bench("nike: shared secret (CTIDH-1024 + X25519)", [&] { nike::derive_secret(kp.priv, kp2.pub); });
-    bench("nike: public key of a private key", [&] { nike::public_of(kp.priv); });
-    bench("nike: public key is valid", [&] { nike::valid_public(kp2.pub); });
-    Bytes msg(400, 7);
-    Bytes sealedbox = nike::seal(kp.pub, msg.data(), msg.size(), rnd);
-    bench("nike: sealed box, seal 400 B", [&] { nike::seal(kp.pub, msg.data(), msg.size(), rnd); });
-    bench("nike: sealed box, open 400 B", [&] { nike::open(kp.priv, kp.pub, sealedbox.data(), sealedbox.size()); });
-    Bytes mk = nike::mkem_encapsulate(kp.pub, msg.data(), msg.size(), rnd);
-    bench("nike: MKEM, encapsulate 400 B", [&] { nike::mkem_encapsulate(kp.pub, msg.data(), msg.size(), rnd); });
-    bench("nike: MKEM, decapsulate 400 B", [&] { nike::mkem_decapsulate(kp.priv, mk.data(), mk.size()); });
+    if (section("nike")) {
+        auto kp = nike::generate(rnd);
+        auto kp2 = nike::generate(rnd);
+        bench("nike: keypair (CTIDH-1024 + X25519)", [] { nike::generate(rnd); });
+        bench("nike: shared secret (CTIDH-1024 + X25519)", [&] { nike::derive_secret(kp.priv, kp2.pub); });
+        bench("nike: public key of a private key", [&] { nike::public_of(kp.priv); });
+        bench("nike: public key is valid", [&] { nike::valid_public(kp2.pub); });
+        Bytes msg(400, 7);
+        Bytes sealedbox = nike::seal(kp.pub, msg.data(), msg.size(), rnd);
+        bench("nike: sealed box, seal 400 B", [&] { nike::seal(kp.pub, msg.data(), msg.size(), rnd); });
+        bench("nike: sealed box, open 400 B", [&] { nike::open(kp.priv, kp.pub, sealedbox.data(), sealedbox.size()); });
+        Bytes mk = nike::mkem_encapsulate(kp.pub, msg.data(), msg.size(), rnd);
+        bench("nike: MKEM, encapsulate 400 B", [&] { nike::mkem_encapsulate(kp.pub, msg.data(), msg.size(), rnd); });
+        bench("nike: MKEM, decapsulate 400 B", [&] { nike::mkem_decapsulate(kp.priv, mk.data(), mk.size()); });
+    }
 
     // ---- BACAP: every box written and read ----
     auto w = bacap::WriteCap::generate(rnd);
@@ -151,19 +259,21 @@ int main(int argc, char** argv) {
     bench("kq1: message from its box", [&] { kq1::message_from_cbor(kq1::unframe(*boxm).data); });
 
     // ---- vouchers: what joining costs ----
-    Bytes mwc = w.bytes();
-    auto minted = *kq1::voucher::mint(mwc, "kate", kq1::voucher::COMPACT, rnd);
-    Bytes salt(32, 3), who(600, 4);
-    auto ind = *kq1::voucher::induct(minted.voucher.data(), minted.payload, who, salt, rnd);
-    bench("voucher: mint (compact)", [&] { kq1::voucher::mint(mwc, "kate", kq1::voucher::COMPACT, rnd); });
-    bench("voucher: induct (compact)", [&] { kq1::voucher::induct(minted.voucher.data(), minted.payload, who, salt, rnd); });
-    bench("voucher: open the reply (compact)", [&] { kq1::voucher::open_reply(minted.secret_key, minted.public_key, ind.sealed, mwc); });
-    auto mintedL = *kq1::voucher::mint(mwc, "kate", kq1::voucher::LONG, rnd);
-    auto indL = *kq1::voucher::induct(mintedL.voucher.data(), mintedL.payload, who, salt, rnd);
-    bench("voucher: mint (long)", [&] { kq1::voucher::mint(mwc, "kate", kq1::voucher::LONG, rnd); });
-    bench("voucher: induct (long)", [&] { kq1::voucher::induct(mintedL.voucher.data(), mintedL.payload, who, salt, rnd); });
-    bench("voucher: open the reply (long)", [&] { kq1::voucher::open_reply(mintedL.secret_key, mintedL.public_key, indL.sealed, mwc); });
-    bench("voucher: derive the voucher stream", [&] { kq1::voucher::derive_stream(minted.voucher.data()); });
+    if (section("voucher")) {
+        Bytes mwc = w.bytes();
+        auto minted = *kq1::voucher::mint(mwc, "kate", kq1::voucher::COMPACT, rnd);
+        Bytes salt(32, 3), who(600, 4);
+        auto ind = *kq1::voucher::induct(minted.voucher.data(), minted.payload, who, salt, rnd);
+        bench("voucher: mint (compact)", [&] { kq1::voucher::mint(mwc, "kate", kq1::voucher::COMPACT, rnd); });
+        bench("voucher: induct (compact)", [&] { kq1::voucher::induct(minted.voucher.data(), minted.payload, who, salt, rnd); });
+        bench("voucher: open the reply (compact)", [&] { kq1::voucher::open_reply(minted.secret_key, minted.public_key, ind.sealed, mwc); });
+        auto mintedL = *kq1::voucher::mint(mwc, "kate", kq1::voucher::LONG, rnd);
+        auto indL = *kq1::voucher::induct(mintedL.voucher.data(), mintedL.payload, who, salt, rnd);
+        bench("voucher: mint (long)", [&] { kq1::voucher::mint(mwc, "kate", kq1::voucher::LONG, rnd); });
+        bench("voucher: induct (long)", [&] { kq1::voucher::induct(mintedL.voucher.data(), mintedL.payload, who, salt, rnd); });
+        bench("voucher: open the reply (long)", [&] { kq1::voucher::open_reply(mintedL.secret_key, mintedL.public_key, indL.sealed, mwc); });
+        bench("voucher: derive the voucher stream", [&] { kq1::voucher::derive_stream(minted.voucher.data()); });
+    }
 
     // ---- the state on flash: a group of 5 with 200 lines ----
     std::vector<Bytes> founders;
@@ -232,17 +342,48 @@ int main(int argc, char** argv) {
         {"unlock after a start", {{"argon2id: unlock (4 MiB, 3 passes)", 1}, {"store: load (sealed)", 1}}},
     };
 
-    std::sort(g_results.begin(), g_results.end(), [](auto& a, auto& b) { return a.us > b.us; });
-    printf("## Operations, slowest first\n\n| operation | time | runs |\n|---|---:|---:|\n");
-    for (auto& r : g_results) printf("| %s | %s | %zu |\n", r.name.c_str(), fmt(r.us).c_str(), r.reps);
-    printf("\n## What a user does\n\n| action | time | made of |\n|---|---:|---|\n");
+    if (g_list) return 0;
+    std::sort(g_results.begin(), g_results.end(), [](auto& a, auto& b) { return a.ns > b.ns; });
+    printf("## Operations, slowest first\n\n| operation | median | fastest | runs |\n|---|---:|---:|---:|\n");
+    for (auto& r : g_results)
+        printf("| %s | %s | %s | %zu |\n", r.name.c_str(), fmt(r.ns / 1e3).c_str(), fmt(r.min_ns / 1e3).c_str(), r.reps);
+
+    // The field operations each one made (one call), and what they cost at the field lines' times.
+    const char* fop[4] = {"mul", "square", "add", "sub"};
+    double fus[4];
+    bool timed = true;
+    for (int i = 0; i < 4; i++) timed &= (fus[i] = us(std::string("field: ") + fop[i] + " (" KQ_FIELD_NAME ")")) >= 0;
+    bool header = false;
+    for (auto& r : g_results) {
+        if (!(r.ops[0] | r.ops[1] | r.ops[2] | r.ops[3])) continue;
+        if (!header) {
+            printf("\n## Field operations (" KQ_FIELD_NAME ") in one call\n\n| operation | mul | square | add | sub |%s\n|---|---:|---:|---:|---:|%s\n",
+                   timed ? " in the field |" : "", timed ? "---:|" : "");
+            header = true;
+        }
+        printf("| %s | %llu | %llu | %llu | %llu |", r.name.c_str(), (unsigned long long)r.ops[0],
+               (unsigned long long)r.ops[1], (unsigned long long)r.ops[2], (unsigned long long)r.ops[3]);
+        if (timed) {
+            double t = 0;
+            for (int i = 0; i < 4; i++) t += r.ops[i] * fus[i];
+            printf(" %s (%.0f%%) |", fmt(t).c_str(), 100 * t / (r.ns / 1e3));
+        }
+        printf("\n");
+    }
+
+    header = false;
     for (auto& a : actions) {
         double t = 0;
         std::string parts;
+        bool all = true;
         for (auto& [op, n] : a.parts) {
+            all &= us(op) >= 0;
             t += us(op) * n;
             parts += (parts.empty() ? "" : ", ") + (n != 1 ? std::to_string((int)n) + "× " : std::string()) + op;
         }
+        if (!all) continue;
+        if (!header) printf("\n## What a user does\n\n| action | time | made of |\n|---|---:|---|\n");
+        header = true;
         printf("| %s | %s | %s |\n", a.what.c_str(), fmt(t).c_str(), parts.c_str());
     }
     return 0;
