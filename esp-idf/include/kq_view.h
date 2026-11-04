@@ -26,3 +26,12 @@ uint32_t kqGeneration();
 std::vector<KqChat> kqChats(const std::string& only = "", bool lines = false);
 // create, join, scan, leave: group; invite: group and voucher code; send: group and text.
 void kqCommand(const char* verb, const std::string& group, const std::string& arg = "");
+
+// Whether the chats can be read yet: at first start the user chooses whether a passphrase
+// protects them; with one, they stay locked after every start until it is given.
+enum class KqLock { STARTING, UNDECIDED, LOCKED, UNLOCKING, OPEN, LOST };
+// The state, and for UNDECIDED, LOCKED and LOST why, or what went wrong last.
+KqLock kqLock(std::string* why = nullptr);
+// At first start: protect the chats with this passphrase, or with none when it is empty.
+void kqSetup(const std::string& passphrase);
+void kqUnlock(const std::string& passphrase);

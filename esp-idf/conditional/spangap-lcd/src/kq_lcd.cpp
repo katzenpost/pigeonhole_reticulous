@@ -4,6 +4,7 @@
 // it; a timer redraws whatever is shown when the engine has taken a step. The look follows rrc's.
 #include "kq_app.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -232,7 +233,7 @@ lv_obj_t* mkPlainField(lv_obj_t* parent, const char* placeholder) {
 
 // ---- state ----
 
-enum Screen { SC_LIST, SC_CHAT };
+enum Screen { SC_LIST, SC_CHAT, SC_LOCK };
 Screen g_screen = SC_LIST;
 std::string g_chat;          // the group on the chat screen
 uint32_t g_seen = 0;         // the engine generation last drawn
@@ -483,8 +484,121 @@ void buildChat() {
     mkButton(bar, "Send", true, onSend);
 }
 
+// ---- the lock: the first start's choice, and the passphrase after every start ----
+
+lv_obj_t *s_lockScr = nullptr, *s_lockBody = nullptr, *s_pass = nullptr, *s_pass2 = nullptr, *s_lockErr = nullptr;
+KqLock g_lockShown = KqLock::OPEN;
+std::string g_lockWhy;
+
+// The passphrase out of a field, and the field emptied.
+std::string takePass(lv_obj_t* f) {
+    if (!f) return "";
+    std::string p = lv_textarea_get_text(f);
+    lv_textarea_set_text(f, "");
+    return p;
+}
+
+void lockError(const char* text) {
+    if (!s_lockErr) return;
+    lv_label_set_text(s_lockErr, text);
+    lv_obj_remove_flag(s_lockErr, LV_OBJ_FLAG_HIDDEN);
+}
+
+void onUsePassphrase(lv_event_t*) {
+    std::string a = takePass(s_pass), b = takePass(s_pass2);
+    if (a.empty()) lockError("Type a passphrase, or choose No passphrase.");
+    else if (a != b) lockError("The two do not match. Type it twice again.");
+    else kqSetup(a);
+    std::fill(a.begin(), a.end(), '\0');
+    std::fill(b.begin(), b.end(), '\0');
+    deferFocus(s_pass);
+}
+
+void onNoPassphrase(lv_event_t*) { kqSetup(""); }
+
+void onUnlock(lv_event_t*) {
+    std::string a = takePass(s_pass);
+    if (!a.empty()) kqUnlock(a);
+    std::fill(a.begin(), a.end(), '\0');
+}
+
+lv_obj_t* mkPassField(lv_obj_t* parent, const char* placeholder, lv_event_cb_t onEnter) {
+    lv_obj_t* f = mkPlainField(parent, placeholder);
+    lv_textarea_set_password_mode(f, true);
+    lv_obj_set_width(f, lv_pct(100));
+    lv_obj_add_event_cb(f, onEnter, LV_EVENT_READY, nullptr);
+    return f;
+}
+
+void drawLock() {
+    std::string why;
+    KqLock l = kqLock(&why);
+    g_lockShown = l;
+    g_lockWhy = why;
+    lv_obj_clean(s_lockBody);
+    s_pass = s_pass2 = s_lockErr = nullptr;
+    lv_obj_t* focus = nullptr;
+    switch (l) {
+        case KqLock::STARTING: mkWrap(s_lockBody, "Starting\xE2\x80\xA6", C_SUB, kFont); break;
+        case KqLock::UNLOCKING: mkWrap(s_lockBody, "Opening your chats. This takes a few seconds.", C_SUB, kFont); break;
+        case KqLock::LOST:
+            mkWrap(s_lockBody, "Your chats cannot be opened on this device.", 0xFFFFFF, kBold);
+            mkWrap(s_lockBody, why, C_AMBER, kSmall);
+            break;
+        case KqLock::UNDECIDED: {
+            mkWrap(s_lockBody, "Protect your chats with a passphrase?", 0xFFFFFF, kBold);
+            mkWrap(s_lockBody,
+                   "With one, someone who takes this device cannot read your groups or messages, but "
+                   "you type it each time the device starts. Without one, they are kept unencrypted. "
+                   "This is asked once.",
+                   C_SUB, kSmall);
+            if (!why.empty()) mkWrap(s_lockBody, why, C_AMBER, kSmall);
+            s_pass = mkPassField(s_lockBody, "passphrase", [](lv_event_t*) { deferFocus(s_pass2); });
+            s_pass2 = mkPassField(s_lockBody, "the same again", onUsePassphrase);
+            s_lockErr = mkWrap(s_lockBody, "", C_AMBER, kSmall);
+            lv_obj_add_flag(s_lockErr, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_t* btns = mkRowBox(s_lockBody, lcdPx(8));
+            lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            mkButton(btns, "No passphrase", false, onNoPassphrase);
+            mkButton(btns, "Use passphrase", true, onUsePassphrase);
+            focus = s_pass;
+            break;
+        }
+        case KqLock::LOCKED:
+            mkWrap(s_lockBody, "Your chats are locked. Type your passphrase to open them.", 0xFFFFFF, kFont);
+            s_pass = mkPassField(s_lockBody, "passphrase", onUnlock);
+            if (!why.empty()) mkWrap(s_lockBody, why, C_AMBER, kSmall);
+            {
+                lv_obj_t* btns = mkRowBox(s_lockBody, lcdPx(8));
+                lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+                mkButton(btns, "Unlock", true, onUnlock);
+            }
+            focus = s_pass;
+            break;
+        case KqLock::OPEN: break;
+    }
+    deferFocus(focus);
+}
+
+void buildLock() {
+    s_lockScr = mkScreen();
+    Header h = mkHeader(s_lockScr, nullptr);
+    lv_label_set_text(h.title, "Group chat");
+    s_lockBody = mkBody(s_lockScr);
+    lv_obj_set_style_pad_row(s_lockBody, lcdPx(6), 0);
+    lv_obj_add_flag(s_lockScr, LV_OBJ_FLAG_HIDDEN);
+}
+
 void showScreen(Screen sc) {
     g_screen = sc;
+    if (sc == SC_LOCK) {
+        lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_chatScr, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_lockScr, LV_OBJ_FLAG_HIDDEN);
+        drawLock();
+        return;
+    }
+    lv_obj_add_flag(s_lockScr, LV_OBJ_FLAG_HIDDEN);
     if (sc == SC_LIST) {
         g_chat.clear();
         lv_obj_add_flag(s_chatScr, LV_OBJ_FLAG_HIDDEN);
@@ -506,6 +620,13 @@ void openChat(const std::string& id) {
 
 void refreshTimerCb(lv_timer_t*) {
     if (!s_layer) return;
+    std::string why;
+    KqLock l = kqLock(&why);
+    if (l != KqLock::OPEN) {
+        if (g_screen != SC_LOCK || l != g_lockShown || why != g_lockWhy) showScreen(SC_LOCK);
+        return;
+    }
+    if (g_screen == SC_LOCK) { showScreen(SC_LIST); return; }
     uint32_t g = kqGeneration();
     if (g == g_seen) return;
     g_seen = g;
@@ -524,7 +645,8 @@ void KqApp::onCreate(lv_obj_t* root) {
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     buildList();
     buildChat();
-    showScreen(SC_LIST);
+    buildLock();
+    showScreen(kqLock() == KqLock::OPEN ? SC_LIST : SC_LOCK);
     g_seen = kqGeneration();
     g_timer = lv_timer_create(refreshTimerCb, 500, nullptr);
 }
@@ -548,6 +670,8 @@ void KqApp::onHide() {
 void KqApp::onClose() {
     if (g_timer) { lv_timer_delete(g_timer); g_timer = nullptr; }
     s_layer = s_list = s_listBody = s_chatScr = s_log = s_compose = s_voucher = s_dialog = s_dialogField = nullptr;
+    s_lockScr = s_lockBody = s_pass = s_pass2 = s_lockErr = nullptr;
+    g_lockShown = KqLock::OPEN;
     g_listHdr = Header{};
     g_chatHdr = Header{};
     g_focusTarget = nullptr;

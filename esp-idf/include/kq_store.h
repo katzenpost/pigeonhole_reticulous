@@ -35,6 +35,10 @@ public:
     kq1::State load(const std::string& me, std::vector<std::string>* problems = nullptr);
     // Saves what the changes name; false when a write failed.
     bool commit(const kq1::State& st, const kq1::Changes& ch);
+    // Writes all of a state, records and lines whole.
+    bool save_all(const kq1::State& st);
+    // Removes the files of a state loaded from here.
+    void erase(const kq1::State& st);
 
     size_t writes = 0, bytes = 0;  // since start
 

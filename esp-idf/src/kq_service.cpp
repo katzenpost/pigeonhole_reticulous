@@ -16,7 +16,9 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
 #include "fs.h"
+#include "pm.h"
 #include "ports.h"
 #include "rnsd.h"
 #include "spangap.h"
@@ -26,6 +28,7 @@
 #include "kq_replica.h"
 #include "kq_runtime.h"
 #include "kq_store.h"
+#include "kq_vault.h"
 #include "kq_view.h"
 
 static const char* TAG = "kq";
@@ -201,7 +204,10 @@ static void workerMain(void* arg) {
     for (;;) {
         kq1::Action* a = nullptr;
         if (xQueueReceive(q, &a, portMAX_DELAY) != pdTRUE || !a) continue;
+        // Tasks idle at the clock's floor; CTIDH is worth the full 240 MHz.
+        if (isHeavy) pmBoost();
         auto* f = new Finished{x.perform(*a), isHeavy};
+        if (isHeavy) pmBoostEnd();
         delete a;
         xQueueSend(s_doneQ, &f, portMAX_DELAY);
         wake();
@@ -259,6 +265,7 @@ static void onCmd(const char* key, const char* val) {
     std::string verb = strrchr(key, '.') + 1, v = val;
     storageUnset(key);
     if (verb == "probe") { probe(); return; }
+    if (!s_store) return;  // locked, or not chosen yet
     size_t bar = v.find('|');
     std::string group = v.substr(0, bar), arg = bar == std::string::npos ? "" : v.substr(bar + 1);
     auto in = kq::input_of(verb, group, arg);
@@ -302,13 +309,13 @@ static kq::StoreFiles fsFiles(const std::string& dir) {
     return f;
 }
 
-// On the kq task, once: what was saved becomes the runtime's state, and every step's changes
-// are saved before its actions are handed out.
+static kq::Vault* s_vault = nullptr;
+
+// On the kq task, once the vault opens: what was saved becomes the runtime's state, and every
+// step's changes are saved before its actions are handed out.
 static void loadChats() {
     if (s_store) return;
-    std::string dir = fsStatePath("/kq");
-    fs_mkdirp(dir.c_str());
-    s_store = new kq::Store(fsFiles(dir));
+    s_store = new kq::Store(s_vault->files());
     std::vector<std::string> problems;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_rt->eng.state = s_store->load(storageGetStr("s.kq.name", "kq"), &problems);
@@ -334,6 +341,10 @@ std::vector<KqChat> kqChats(const std::string& only, bool lines) {
     xSemaphoreGive(s_mu);
     return out;
 }
+
+KqLock kqLock(std::string* why) { return s_vault ? s_vault->state(why) : KqLock::STARTING; }
+void kqSetup(const std::string& passphrase) { if (s_vault) { s_vault->ask_setup(passphrase); wake(); } }
+void kqUnlock(const std::string& passphrase) { if (s_vault) { s_vault->ask_unlock(passphrase); wake(); } }
 
 void kqCommand(const char* verb, const std::string& group, const std::string& arg) {
     std::string v = arg.empty() ? group : group + "|" + arg;
@@ -362,6 +373,21 @@ static void cliKq(const char* args) {
     std::string verb = a.substr(0, sp), rest = sp == std::string::npos ? "" : a.substr(sp + 1);
     sp = rest.find(' ');
     std::string group = rest.substr(0, sp), arg = sp == std::string::npos ? "" : rest.substr(sp + 1);
+    // The passphrase goes to the vault directly: kept as a storage key, a browser would see it.
+    if (verb == "setup" && (group == "none" || (group == "passphrase" && !arg.empty()))) {
+        kqSetup(group == "none" ? "" : arg);
+        sodium_memzero(a.data(), a.size());
+        sodium_memzero(arg.data(), arg.size());
+        cliPrintf("asked; `kq` shows the result\n");
+        return;
+    }
+    if (verb == "unlock" && !rest.empty()) {
+        kqUnlock(rest);
+        sodium_memzero(a.data(), a.size());
+        sodium_memzero(rest.data(), rest.size());
+        cliPrintf("asked; `kq` shows the result\n");
+        return;
+    }
     if (verb == "probe") { storageSet("kq.cmd.probe", "1"); cliPrintf("probe queued; `kq` shows the result\n"); return; }
     if ((verb == "create" || verb == "join" || verb == "scan" || verb == "leave") && !group.empty()) {
         kqCommand(verb.c_str(), group);
@@ -374,9 +400,20 @@ static void cliKq(const char* args) {
     if (verb == "groups") { printChats("", false); return; }
     if (verb == "log" && !group.empty()) { printChats(group, true); return; }
     if (!a.empty() && verb != "status") {
-        cliPrintf("kq [status] | probe | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n");
+        cliPrintf("kq [status] | probe | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n"
+                  "   | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
         return;
     }
+    static const char* locks[] = {"starting", "no choice made yet: kq setup none | kq setup passphrase <p>",
+                                  "locked: kq unlock <p>", "unlocking", "open", "cannot be opened"};
+    std::string why;
+    KqLock l = kqLock(&why);
+    cliPrintf("chats: %s%s%s\n", locks[(int)l], why.empty() ? "" : "; ", why.c_str());
+    if (s_vault && s_vault->last_ms)
+        cliPrintf("passphrase: Argon2id over %u KiB, %u passes, took %u ms\n", (unsigned)(s_vault->last_mem >> 10),
+                  (unsigned)s_vault->last_ops, (unsigned)s_vault->last_ms);
+    cliPrintf("PSRAM: %u KiB free, %u KiB in one piece\n", (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10),
+              (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) >> 10));
     cliPrintf("replicas heard: %u\n", (unsigned)s_replicas.size());
     for (auto& [d, r] : s_replicas) cliPrintf("  %s hops %d flags %d\n", d.c_str(), r.hops, r.flags);
     cliPrintf("channel: %s %s\n", s_chanDest.empty() ? "-" : s_chanDest.c_str(),
@@ -394,7 +431,11 @@ static void kqTaskMain(void*) {
     if (!itsServerInit()) err("kq itsServerInit failed");
     itsClientInit(4);
     storageSubscribeChanges("rnsd.chan.kq.rep", onChanState);
-    loadChats();
+    std::string dir = fsStatePath("/kq");
+    fs_mkdirp(dir.c_str());
+    kq::Vault::room = [] { return heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM); };
+    kq::Vault::boost = [](bool on) { on ? pmBoost() : pmBoostEnd(); };
+    s_vault = new kq::Vault(fsFiles(dir));
     storageSubscribeChanges("kq.cmd.", onCmd);
     spawnTask(workerMain, "kq.io", kLightStack, nullptr, 1, 1, STACK_PSRAM);
     spawnTask(workerMain, "kq.ctidh", kHeavyStack, (void*)1, 1, 1, STACK_PSRAM);
@@ -405,7 +446,12 @@ static void kqTaskMain(void*) {
             if (s_annHandle < 0) connectAnnounces();
             openChannel();
             s_client->tick(nowMs());
-            pumpClient();
+            uint32_t derived = s_vault->last_ms;
+            if (s_vault->serve()) loadChats();
+            if (s_vault->last_ms != derived)
+                info("kq: Argon2id over %u KiB, %u passes: %u ms", (unsigned)(s_vault->last_mem >> 10),
+                     (unsigned)s_vault->last_ops, (unsigned)s_vault->last_ms);
+            if (s_store) pumpClient();
         }
         if (s_chan >= 0) chanClosed();
         if (s_annHandle >= 0) { itsDisconnect(s_annHandle); s_annHandle = -1; }

@@ -19,6 +19,7 @@
 
 #include "kq_runtime.h"
 #include "kq_store.h"
+#include "kq_vault.h"
 #include "kq_view.h"
 #include "sim.h"
 
@@ -29,6 +30,7 @@ kq::ReplicaClient* g_client;
 kq::Runtime* g_rt;
 kq::ReplicaBackend* g_backend;
 kq::Store* g_store;
+kq::Vault* g_vault;
 int g_sock = -1;
 bool g_up = false;
 std::string g_path;
@@ -122,21 +124,40 @@ void bridge(std::function<void(std::function<void()>)> fn) {
     p.get_future().wait();
 }
 
+std::string g_name;
+
+// Under g_mu, once the vault opens: as the kq task's loadChats.
+void loadChats() {
+    g_store = new kq::Store(g_vault->files());
+    std::vector<std::string> problems;
+    g_rt->eng.state = g_store->load(g_name, &problems);
+    for (auto& p : problems) fprintf(stderr, "sim: not loaded: %s\n", p.c_str());
+    fprintf(stderr, "sim: %zu chats loaded\n", g_rt->eng.state.chats.size());
+    g_rt->on_changes = [](const kq1::Changes& ch) {
+        if (!g_store->commit(g_rt->eng.state, ch)) fprintf(stderr, "sim: saving the chats failed\n");
+    };
+    g_rt->resume(nowS());
+}
+
 void kqLoop() {
     uint64_t lastTry = 0;
     for (;;) {
+        bool opened = g_vault->serve();  // Argon2 takes a while: not under g_mu
         {
             std::lock_guard<std::mutex> g(g_mu);
             if (g_sock < 0 && nowMs() - lastTry > 2000) { lastTry = nowMs(); connectSock(); }
             if (g_sock >= 0) readSock();
             g_client->tick((uint32_t)nowMs());
-            g_rt->tick(nowS(), nowMs());
-            while (auto a = g_rt->take_if([](const kq1::Action& x) { return (heavy(x) ? g_heavy : g_light).idle; })) {
-                Worker& w = heavy(*a) ? g_heavy : g_light;
-                w.idle = false;
-                std::lock_guard<std::mutex> l(w.m);
-                w.q.push_back(std::move(*a));
-                w.cv.notify_one();
+            if (opened) loadChats();
+            if (g_store) {
+                g_rt->tick(nowS(), nowMs());
+                while (auto a = g_rt->take_if([](const kq1::Action& x) { return (heavy(x) ? g_heavy : g_light).idle; })) {
+                    Worker& w = heavy(*a) ? g_heavy : g_light;
+                    w.idle = false;
+                    std::lock_guard<std::mutex> l(w.m);
+                    w.q.push_back(std::move(*a));
+                    w.cv.notify_one();
+                }
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -151,22 +172,20 @@ void simClientStart(const std::string& socketPath, const std::string& name, size
     g_client = new kq::ReplicaClient(boxSize, sendFrame);
     g_backend = new kq::ReplicaBackend(*g_client, bridge);
     g_rt = new kq::Runtime(kq1::State{name, {}}, boxSize);
-    g_store = new kq::Store(kq::posix_files(stateDir));
-    std::vector<std::string> problems;
-    g_rt->eng.state = g_store->load(name, &problems);
-    for (auto& p : problems) fprintf(stderr, "sim: not loaded: %s\n", p.c_str());
-    fprintf(stderr, "sim: %zu chats loaded\n", g_rt->eng.state.chats.size());
-    g_rt->on_changes = [](const kq1::Changes& ch) {
-        if (!g_store->commit(g_rt->eng.state, ch)) fprintf(stderr, "sim: saving the chats failed\n");
-    };
-    g_rt->resume(nowS());
+    g_name = name;
+    g_vault = new kq::Vault(kq::posix_files(stateDir));
     std::thread(workerMain, &g_light).detach();
     std::thread(workerMain, &g_heavy).detach();
     std::thread(kqLoop).detach();
 }
 
+KqLock kqLock(std::string* why) { return g_vault ? g_vault->state(why) : KqLock::STARTING; }
+void kqSetup(const std::string& passphrase) { if (g_vault) g_vault->ask_setup(passphrase); }
+void kqUnlock(const std::string& passphrase) { if (g_vault) g_vault->ask_unlock(passphrase); }
+
 std::string simSaved() {
     std::lock_guard<std::mutex> g(g_mu);
+    if (!g_store) return "nothing: locked";
     return std::to_string(g_store->writes) + " writes, " + std::to_string(g_store->bytes) + " bytes";
 }
 
@@ -186,5 +205,6 @@ void kqCommand(const char* verb, const std::string& group, const std::string& ar
     auto in = kq::input_of(verb, group, arg);
     if (!in) return;
     std::lock_guard<std::mutex> g(g_mu);
+    if (!g_store) return;
     g_rt->input(nowS(), nowMs(), *in);
 }
