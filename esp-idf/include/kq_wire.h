@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // What a client sends a Pigeonhole replica over Reticulum and what comes back: queries,
 // replies, box padding, and the Channel frames that carry them on stacks without requests.
 #pragma once

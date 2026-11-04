@@ -1,5 +1,5 @@
 description: "katzenqt1 group chat over Pigeonhole replicas on Reticulum"
-url: https://github.com/katzenpost/katzenqt1-reticulous
+url: https://github.com/katzenpost/pigeonhole_reticulous
 version: "0.1.0"
 targets:
   - esp32s3

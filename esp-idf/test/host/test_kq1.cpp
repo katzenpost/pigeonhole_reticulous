@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The katzenqt1 wire against pigeonhole_protocols testdata/katzenqt1, as its Rust tests
 // (tests/katzenqt1_wire_vectors*.rs) read them.
 #include <sodium.h>

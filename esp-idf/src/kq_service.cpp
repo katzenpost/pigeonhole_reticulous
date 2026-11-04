@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The kq task: finds the nearest Pigeonhole replica that serves Channel mode, keeps one
 // Channel to it, carries the replica client's frames over it, and runs the katzenqt1 client:
 // the engine on this task, the executor on two workers whose box reads and writes come back

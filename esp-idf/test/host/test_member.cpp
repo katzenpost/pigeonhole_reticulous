@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The katzenqt1 member against pigeonhole_protocols testdata/katzenqt1, as its Rust tests
 // (tests/katzenqt1_member_sim.rs, katzenqt1_member_replay.rs) do: katzenqt's scenarios run as
 // written, their calls match katzenqt's recorded traces, and every trace replays to the same

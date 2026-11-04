@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The katzenqt1 engine and executor against group_chat_client's client scenarios, through an
 // in-memory transport, as pigeonhole_protocols rust/tests/katzenqt1_client_scenarios.rs and its
 // harness (tests/katzenqt1_client_harness) with transport/sim.rs. The scenarios are read from

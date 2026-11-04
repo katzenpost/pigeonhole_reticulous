@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // BACAP, as hpqc/bacap: streams of boxes a write capability writes and a read capability reads.
 #pragma once
 #include <cstdint>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The client around the engine: the actions it asks for are queued until a worker takes one,
 // results come back as inputs, retries and deferred inputs wait for their time. And the
 // Backend the executor runs on a device: boxes through the replica client, vouchers here.

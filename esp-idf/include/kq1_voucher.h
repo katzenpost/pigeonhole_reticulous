@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Contact vouchers, as hpqc/voucher: the compact form (2), a CBOR array answered with a sealed
 // box, and the long form (1), signed maps answered with the MKEM.
 #pragma once

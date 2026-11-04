@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The Channel-mode replica client against an in-memory replica that answers as
 // pigeonhole_rns does: stores verified boxes, refuses a different box under a used ID.
 #include <cstring>

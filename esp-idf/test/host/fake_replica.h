@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // An in-memory replica that answers as pigeonhole_rns does: stores verified boxes, refuses a
 // different box under a used ID, never replaces a tombstone.
 #pragma once

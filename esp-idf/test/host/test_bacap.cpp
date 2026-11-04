@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // BACAP and its primitives against hpqc/bacap/testdata.
 #include <sodium.h>
 

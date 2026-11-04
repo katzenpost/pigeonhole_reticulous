@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The katzenqt1 wire, version 4 arrays and version 3 maps, as pigeonhole_protocols
 // rust/src/protocols/katzenqt1/wire.
 #pragma once

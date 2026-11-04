@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // A client of one Pigeonhole replica in Channel mode: box reads and writes become queries cut
 // into frames, replies are matched to them by request id. No I/O: the owner hands it each
 // Channel message that arrives and sends the frames it is given.

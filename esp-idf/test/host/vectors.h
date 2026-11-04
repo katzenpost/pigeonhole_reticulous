@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Reads build/vectors.txt (see gen_vectors.py) and counts checks.
 #pragma once
 #include <cstdio>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The hybrid NIKE X25519 then CTIDH-1024, and the hpqc sealed box and MKEM over it.
 #pragma once
 #include <functional>

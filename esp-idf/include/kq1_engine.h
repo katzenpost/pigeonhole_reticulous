@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The katzenqt1 client engine, sans IO, as pigeonhole_protocols rust/src/protocols/katzenqt1/engine:
 // chats, their logs and their pending writes over the member state machine. Engine::step takes
 // an Input and returns Actions to carry out; Executor carries them out over a Backend and turns

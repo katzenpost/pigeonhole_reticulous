@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // CTIDH-1024 field helpers, the hybrid NIKE, sealed box and MKEM, against hpqc's vectors.
 #include <sodium.h>
 

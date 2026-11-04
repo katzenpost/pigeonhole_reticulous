@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // The katzenqt1 member, sans IO, as pigeonhole_protocols rust/src/protocols/katzenqt1/member: one
 // group as one member sees it. Group::handle takes an Event and returns the Effects to carry out.
 #pragma once

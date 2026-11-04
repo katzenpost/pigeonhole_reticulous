@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Flattens JSON vector files into vectors.txt for the host tests: one vector per line,
 `file<TAB>name<TAB>key=value...`, nested values as compact JSON."""
 import json

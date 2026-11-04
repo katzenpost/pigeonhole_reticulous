@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Primitives BACAP and the voucher seal need beyond what libsodium names directly.
 #pragma once
 #include <cstddef>

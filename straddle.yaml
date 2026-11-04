@@ -1,10 +1,10 @@
-# katzenqt1-reticulous — katzenqt1 group chat on Reticulous.
+# pigeonhole_reticulous — Pigeonhole apps on Reticulous; the first is katzenqt1 group chat.
 #
 # The node is a katzenqt1 client on a Reticulum mesh: it finds a Pigeonhole replica
 # (pigeonhole.replica), keeps one Channel to it, and reads and writes the BACAP boxes
 # of its groups through it. Speaks to rnsd only through rnsd.h.
 schema_version: 1
-name: katzenpost/katzenqt1-reticulous
+name: katzenpost/pigeonhole_reticulous
 prefix: kq
 version: 0.1.0
 firmware: esp-idf

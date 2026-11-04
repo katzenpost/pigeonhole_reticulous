@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Vouchers against hpqc voucher/testdata: mint, induct and open, in both forms.
 #include <sodium.h>
 

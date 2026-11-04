@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Two clients through one in-memory replica, with real crypto: bob mints a voucher, alice adds
 // him, they talk. Everything a device runs but the tasks that carry it.
 #include <sodium.h>

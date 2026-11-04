@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 // Pigeonhole queries, replies and padding against pigeonhole_rns's bridge vectors, and the
 // Channel frames as pigeonhole_rns tests/test_channel.py exercises them.
 #include <sodium.h>
