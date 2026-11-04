@@ -44,7 +44,7 @@ static void reduce_once(uint32_t out[N], const uint32_t t[N]) {
 }
 
 // Montgomery multiplication, CIOS (Koc, Acar, Kaliski 1996): r = a * b / R mod p.
-static void mont_mul(uint32_t r[N], const uint32_t a[N], const uint32_t b[N]) {
+__attribute__((noinline)) static void mont_mul(uint32_t r[N], const uint32_t a[N], const uint32_t b[N]) {
     uint32_t t[N + 2];
     memset(t, 0, sizeof t);
     for (int i = 0; i < N; i++) {
@@ -82,7 +82,7 @@ static void mont_mul(uint32_t r[N], const uint32_t a[N], const uint32_t b[N]) {
 }
 
 // Montgomery reduction of a 2N-word t < pR: r = t / R mod p.
-static void redc(uint32_t r[N], uint32_t t[2 * N]) {
+__attribute__((noinline)) static void redc(uint32_t r[N], uint32_t t[2 * N]) {
     uint32_t ec = 0;  // the carry out of the previous round's top word, owed to t[i + N]
     for (int i = 0; i < N; i++) {
         uint32_t m = t[i] * PINV, c = 0;
@@ -103,7 +103,7 @@ static void redc(uint32_t r[N], uint32_t t[2 * N]) {
 }
 
 // r = a^2 / R mod p: each cross product a[i] a[j] once, doubled by a shift, plus the diagonal.
-static void mont_square(uint32_t r[N], const uint32_t a[N]) {
+__attribute__((noinline)) static void mont_square(uint32_t r[N], const uint32_t a[N]) {
     uint32_t t[2 * N];
     memset(t, 0, sizeof t);
     for (int i = 0; i < N - 1; i++) {
