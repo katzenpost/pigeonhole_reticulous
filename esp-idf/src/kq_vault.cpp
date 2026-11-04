@@ -230,7 +230,7 @@ bool Vault::unlock(const std::string& pass) {
     }
     sodium_memzero(kek.data(), kek.size());
     if (!key || key->size() != 32) {
-        set(KqLock::LOCKED, "that is not the passphrase");
+        set(KqLock::LOCKED, "That is not the passphrase.");
         return false;
     }
     key_ = Bytes(key->begin(), key->end());

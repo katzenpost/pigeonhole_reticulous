@@ -168,6 +168,7 @@ static void openChannel() {
 // ---- the client: the runtime on this task, the executor on workers ----
 
 static kq::Runtime* s_rt = nullptr;
+static kq::Store* s_store = nullptr;  // once the chats are open
 static kq::ReplicaBackend* s_backend = nullptr;
 static SemaphoreHandle_t s_mu = nullptr;  // the engine's state, which the CLI reads
 static QueueHandle_t s_lightQ = nullptr, s_heavyQ = nullptr, s_doneQ = nullptr, s_bridgeQ = nullptr;
@@ -276,8 +277,6 @@ static void onCmd(const char* key, const char* val) {
 }
 
 // ---- the chats on flash, under fsStateDir()/kq ----
-
-static kq::Store* s_store = nullptr;
 
 static kq::StoreFiles fsFiles(const std::string& dir) {
     auto path = [dir](const std::string& n) { return dir + "/" + n; };
