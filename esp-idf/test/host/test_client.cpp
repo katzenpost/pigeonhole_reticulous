@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "kq1_engine.h"
+#include "kq_store.h"
 #include "vectors.h"
 
 using namespace kq1;
@@ -139,7 +140,12 @@ static std::string kind_of(const Action& a) {
 struct Client {
     std::string name;
     Engine eng;
+    // What it saves after every step, which must load back as the state it has.
+    std::shared_ptr<std::map<std::string, std::string>> files = std::make_shared<std::map<std::string, std::string>>();
+    std::shared_ptr<kq::Store> store = std::make_shared<kq::Store>(kq::memory_files(*files));
 };
+
+static int g_saved = 0, g_unsaved = 0;
 
 struct Later {
     uint64_t due;
@@ -165,6 +171,13 @@ struct World {
     }
     void feed(size_t i, const Input& input) { release(i, members[i].eng.step(0, input)); }
     void release(size_t i, const StepResult& res) {
+        Client& m = members[i];
+        if (!m.store->commit(m.eng.state, res.changes)) throw std::runtime_error("store: a write failed");
+        std::vector<std::string> problems;
+        kq::Store fresh(kq::memory_files(*m.files));
+        bool same = kq::state_dump(fresh.load(m.name, &problems)) == kq::state_dump(m.eng.state) && problems.empty();
+        (same ? g_saved : g_unsaved)++;
+        if (!same) fprintf(stderr, "%s: the saved state differs from the state after a step\n", m.name.c_str());
         for (auto& a : res.actions) queue.push_back({i, a});
     }
     bool act() {
@@ -446,5 +459,7 @@ int main() {
             check(false, s, "runs");
         }
     }
+    check(g_unsaved == 0 && g_saved > 0, v, "every step's state is saved");
+    printf("client: %d steps saved and loaded back\n", g_saved);
     return finish("client");
 }

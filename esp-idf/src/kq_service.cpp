@@ -16,6 +16,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "fs.h"
 #include "ports.h"
 #include "rnsd.h"
 #include "spangap.h"
@@ -24,6 +25,7 @@
 
 #include "kq_replica.h"
 #include "kq_runtime.h"
+#include "kq_store.h"
 #include "kq_view.h"
 
 static const char* TAG = "kq";
@@ -259,19 +261,65 @@ static void onCmd(const char* key, const char* val) {
     if (verb == "probe") { probe(); return; }
     size_t bar = v.find('|');
     std::string group = v.substr(0, bar), arg = bar == std::string::npos ? "" : v.substr(bar + 1);
-    static const std::map<std::string, kq1::Input::Kind> kinds = {
-        {"create", kq1::Input::CREATE}, {"join", kq1::Input::JOIN},   {"invite", kq1::Input::INDUCT},
-        {"send", kq1::Input::SEND},     {"scan", kq1::Input::SCAN},   {"leave", kq1::Input::LEAVE}};
-    auto k = kinds.find(verb);
-    if (k == kinds.end()) return;
-    kq1::Input in(k->second);
-    in.chat = group;
-    in.name = group;
-    in.code = arg;
-    in.text = arg;
+    auto in = kq::input_of(verb, group, arg);
+    if (!in) return;
     xSemaphoreTake(s_mu, portMAX_DELAY);
-    s_rt->input(nowS(), nowMs(), in);
+    s_rt->input(nowS(), nowMs(), *in);
     xSemaphoreGive(s_mu);
+}
+
+// ---- the chats on flash, under fsStateDir()/kq ----
+
+static kq::Store* s_store = nullptr;
+
+static kq::StoreFiles fsFiles(const std::string& dir) {
+    auto path = [dir](const std::string& n) { return dir + "/" + n; };
+    auto put = [](const std::string& p, const std::string& d, const char* mode) {
+        int f = fs_open(p.c_str(), mode);
+        if (f < 0) return false;
+        bool ok = fs_write(d.data(), 1, d.size(), f) == d.size() && fs_sync(f) == 0;
+        fs_close(f);
+        return ok;
+    };
+    kq::StoreFiles f;
+    f.read = [path](const std::string& n) -> std::optional<std::string> {
+        int h = fs_open(path(n).c_str(), "rb");
+        if (h < 0) return std::nullopt;
+        std::string s;
+        char buf[1024];
+        size_t k;
+        while ((k = fs_read(buf, 1, sizeof buf, h)) > 0) s.append(buf, k);
+        fs_close(h);
+        return s;
+    };
+    f.replace = [path, put](const std::string& n, const std::string& d) {
+        std::string tmp = path(n) + ".new";
+        if (!put(tmp, d, "wb")) { fs_remove(tmp.c_str()); return false; }
+        return fs_rename(tmp.c_str(), path(n).c_str()) == 0;
+    };
+    f.append = [path, put](const std::string& n, const std::string& d) { return put(path(n), d, "ab"); };
+    f.remove = [path](const std::string& n) { fs_remove(path(n).c_str()); };
+    return f;
+}
+
+// On the kq task, once: what was saved becomes the runtime's state, and every step's changes
+// are saved before its actions are handed out.
+static void loadChats() {
+    if (s_store) return;
+    std::string dir = fsStatePath("/kq");
+    fs_mkdirp(dir.c_str());
+    s_store = new kq::Store(fsFiles(dir));
+    std::vector<std::string> problems;
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    s_rt->eng.state = s_store->load(storageGetStr("s.kq.name", "kq"), &problems);
+    s_rt->on_changes = [](const kq1::Changes& ch) {
+        if (!s_store->commit(s_rt->eng.state, ch)) err("kq: saving the chats failed");
+    };
+    s_rt->resume(nowS());
+    size_t n = s_rt->eng.state.chats.size();
+    xSemaphoreGive(s_mu);
+    for (auto& p : problems) warn("kq: not loaded: %s", p.c_str());
+    info("kq: %u chats loaded", (unsigned)n);
 }
 
 // ---- CLI ----
@@ -282,35 +330,7 @@ std::vector<KqChat> kqChats(const std::string& only, bool lines) {
     std::vector<KqChat> out;
     if (!s_mu || !s_rt) return out;
     xSemaphoreTake(s_mu, portMAX_DELAY);
-    for (auto& c : s_rt->eng.state.chats) {
-        if (!only.empty() && c.id != only) continue;
-        KqChat k;
-        k.id = c.id;
-        k.joined = c.group.has_value();
-        k.adding = c.inducting.has_value();
-        if (c.joining) k.voucher = c.joining->code.empty() ? "\xE2\x80\xA6" : c.joining->code;
-        k.members = c.group ? (unsigned)c.group->readers.size() : 0;
-        k.pending = (unsigned)c.jobs.size();
-        if (lines) {
-            for (auto& l : c.log) {
-                KqLine x;
-                if (l.notice) {
-                    x.notice = true;
-                    x.text = kq1::plain(*l.notice);
-                } else {
-                    x.mine = c.group && c.group->me() == l.sender;
-                    const std::string* n = c.names.get(l.sender);
-                    x.who = x.mine ? "me" : n ? *n : "?";
-                    x.text = l.text;
-                    if (x.mine)
-                        x.mark = l.status == kq1::Status::Pending ? KqLine::PENDING
-                               : c.acknowledged(l) ? KqLine::READ : KqLine::WRITTEN;
-                }
-                k.lines.push_back(std::move(x));
-            }
-        }
-        out.push_back(std::move(k));
-    }
+    out = kq::chats(s_rt->eng.state, only, lines);
     xSemaphoreGive(s_mu);
     return out;
 }
@@ -363,6 +383,7 @@ static void cliKq(const char* args) {
               s_chan < 0 ? "closed" : s_chanUp ? "up" : "opening");
     cliPrintf("requests pending: %u, box size %u\n", (unsigned)s_client->pending(), (unsigned)s_client->box_size());
     cliPrintf("frames sent %u, refused %u, received %u; probe: %s\n", s_sent, s_sendFail, s_recv, s_probe.c_str());
+    if (s_store) cliPrintf("saved: %u writes, %u bytes\n", (unsigned)s_store->writes, (unsigned)s_store->bytes);
 }
 
 // ---- task ----
@@ -373,6 +394,7 @@ static void kqTaskMain(void*) {
     if (!itsServerInit()) err("kq itsServerInit failed");
     itsClientInit(4);
     storageSubscribeChanges("rnsd.chan.kq.rep", onChanState);
+    loadChats();
     storageSubscribeChanges("kq.cmd.", onCmd);
     spawnTask(workerMain, "kq.io", kLightStack, nullptr, 1, 1, STACK_PSRAM);
     spawnTask(workerMain, "kq.ctidh", kHeavyStack, (void*)1, 1, 1, STACK_PSRAM);
@@ -419,7 +441,6 @@ void KqService::onInit() {
     s_doneQ = xQueueCreate(2, sizeof(Finished*));
     s_bridgeQ = xQueueCreate(2, sizeof(BridgeReq*));
     s_backend = new kq::ReplicaBackend(*s_client, bridge);
-    // shortcut: the chat state lives in RAM only; persisting it under /state is the next step.
     s_rt = new kq::Runtime(kq1::State{storageGetStr("s.kq.name", "kq"), {}}, s_client->box_size());
     cliRegisterCmd("kq", cliKq);
     rnsServiceRegister(TAG, kqStart, kqStop);

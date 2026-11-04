@@ -201,8 +201,7 @@ void deferFocus(lv_obj_t* o) {
     lv_timer_set_repeat_count(t, 1);
 }
 
-lv_obj_t* mkField(lv_obj_t* parent, const char* placeholder, int maxLines) {
-    lv_obj_t* f = lcdInputBoxCreate(parent, 1, maxLines);
+void styleField(lv_obj_t* f, const char* placeholder) {
     lv_obj_set_style_text_font(f, kFont, 0);
     lv_obj_set_style_bg_opa(f, LV_OPA_TRANSP, 0);
     lv_obj_set_style_text_color(f, lv_color_white(), 0);
@@ -214,6 +213,20 @@ lv_obj_t* mkField(lv_obj_t* parent, const char* placeholder, int maxLines) {
     lv_obj_set_style_pad_hor(f, lcdPx(6), 0);
     lv_textarea_set_placeholder_text(f, placeholder);
     if (lcdInputGroup()) lv_group_add_obj(lcdInputGroup(), f);
+}
+
+lv_obj_t* mkField(lv_obj_t* parent, const char* placeholder, int maxLines) {
+    lv_obj_t* f = lcdInputBoxCreate(parent, 1, maxLines);
+    styleField(f, placeholder);
+    return f;
+}
+
+// One line taken as typed: the input box would capitalize a voucher code's first letter.
+lv_obj_t* mkPlainField(lv_obj_t* parent, const char* placeholder) {
+    lv_obj_t* f = lv_textarea_create(parent);
+    lv_textarea_set_one_line(f, true);
+    styleField(f, placeholder);
+    lcdKeyboardAttach(f);
     return f;
 }
 
@@ -251,15 +264,22 @@ void closeDialog() {
     s_dialog = s_dialogField = nullptr;
     lcdModalUntrack(o);
     lv_obj_delete(o);
+    // The release of the key that closed it lands on whatever has focus now, so not on
+    // whatever the group falls back to.
+    lv_obj_t* f = g_screen == SC_CHAT ? s_compose : s_listBody ? lv_obj_get_child(s_listBody, 0) : nullptr;
+    if (f && lv_obj_get_group(f)) lv_group_focus_obj(f);
 }
 
 void dialogSubmit(lv_event_t*) {
     if (!s_dialogField) return;
-    std::string v = lcdInputBoxText(s_dialogField);
+    std::string v = lv_textarea_get_text(s_dialogField);
+    v.erase(0, v.find_first_not_of(" "));
+    v.erase(v.find_last_not_of(" ") + 1);
+    if (v.empty()) return;
     auto ok = g_dialogOk;
     lcdKeyboardClose();
+    if (ok) ok(v);  // first, so the focus closeDialog gives is on the screen ok shows
     closeDialog();
-    if (!v.empty() && ok) ok(v);
 }
 
 void showDialog(const std::string& title, const std::string& hint, const char* placeholder, const char* verb,
@@ -289,7 +309,7 @@ void showDialog(const std::string& title, const std::string& hint, const char* p
 
     mkLabel(box, title, 0xFFFFFF, kBold);
     if (!hint.empty()) mkWrap(box, hint, C_SUB, kSmall);
-    s_dialogField = mkField(box, placeholder, 3);
+    s_dialogField = mkPlainField(box, placeholder);
     lv_obj_set_width(s_dialogField, lv_pct(100));
     lv_obj_add_event_cb(s_dialogField, dialogSubmit, LV_EVENT_READY, nullptr);
 
@@ -354,8 +374,8 @@ void buildList() {
 const char* markOf(KqLine::Mark m) {
     switch (m) {
         case KqLine::PENDING: return " \xE2\x80\xA6";
-        case KqLine::WRITTEN: return " \xE2\x9C\x93";
-        case KqLine::READ: return " \xE2\x9C\x93\xE2\x9C\x93";
+        case KqLine::WRITTEN: return " " LV_SYMBOL_OK;
+        case KqLine::READ: return " " LV_SYMBOL_OK LV_SYMBOL_OK;
         default: return "";
     }
 }

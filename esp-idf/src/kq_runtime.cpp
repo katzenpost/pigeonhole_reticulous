@@ -143,4 +143,57 @@ std::optional<kq1::Opened> ReplicaBackend::voucher_open(const Bytes& secret_key,
     return kq1::Opened{o->who_reply, o->mutated_write_cap};
 }
 
+// ---- what the screens and the CLI show, and the commands they send ----
+
+std::vector<KqChat> chats(const kq1::State& st, const std::string& only, bool lines) {
+    std::vector<KqChat> out;
+    for (auto& c : st.chats) {
+        if (!only.empty() && c.id != only) continue;
+        KqChat k;
+        k.id = c.id;
+        k.joined = c.group.has_value();
+        k.adding = c.inducting.has_value();
+        if (c.joining) k.voucher = c.joining->code.empty() ? "\xE2\x80\xA6" : c.joining->code;
+        k.members = c.group ? (unsigned)c.group->readers.size() : 0;
+        k.pending = (unsigned)c.jobs.size();
+        if (lines) {
+            for (auto& l : c.log) {
+                KqLine x;
+                if (l.notice) {
+                    x.notice = true;
+                    // The shared wording names the file katzenrns keeps the code in; there is none here.
+                    x.text = l.notice->kind == kq1::NoticeKind::VoucherMinted
+                                 ? "give the voucher code to a member of the group"
+                                 : kq1::plain(*l.notice);
+                } else {
+                    x.mine = c.group && c.group->me() == l.sender;
+                    const std::string* n = c.names.get(l.sender);
+                    x.who = x.mine ? "me" : n ? *n : "?";
+                    x.text = l.text;
+                    if (x.mine)
+                        x.mark = l.status == kq1::Status::Pending ? KqLine::PENDING
+                               : c.acknowledged(l) ? KqLine::READ : KqLine::WRITTEN;
+                }
+                k.lines.push_back(std::move(x));
+            }
+        }
+        out.push_back(std::move(k));
+    }
+    return out;
+}
+
+std::optional<kq1::Input> input_of(const std::string& verb, const std::string& group, const std::string& arg) {
+    static const std::map<std::string, kq1::Input::Kind> kinds = {
+        {"create", kq1::Input::CREATE}, {"join", kq1::Input::JOIN},   {"invite", kq1::Input::INDUCT},
+        {"send", kq1::Input::SEND},     {"scan", kq1::Input::SCAN},   {"leave", kq1::Input::LEAVE}};
+    auto k = kinds.find(verb);
+    if (k == kinds.end()) return std::nullopt;
+    kq1::Input in(k->second);
+    in.chat = group;
+    in.name = group;
+    in.code = arg;
+    in.text = arg;
+    return in;
+}
+
 }  // namespace kq
