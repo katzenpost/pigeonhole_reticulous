@@ -55,20 +55,20 @@ int main() {
     if (sodium_init() < 0) return 2;
     Vec v{"field", "", {}};
 
-    // The edge values: 0, 1, 2, p-1, p-2, R mod p (computed by fiat as mul(R^2 ... ) is not at
-    // hand, so as 2^1024 - p - ...: here the largest element whose words are mostly ones).
-    std::vector<Fe> edge;
+    // The edge values: 0, 1, 2, p-1, p-2, R mod p (1 doubled 1024 times by fiat's add), every
+    // word set below p's top word, and p's top word alone.
     Fe zero{}, one{}, two{};
     one.w[0] = 1;
     two.w[0] = 2;
-    edge = {zero, one, two, minus(kP, 1), minus(kP, 2)};
-    Fe ones = minus(kP, 1);
-    for (int i = 0; i < 15; i++) ones.w[i] = ~0ull;  // p's top word with all lower words set: still below p?
+    Fe r = one;
+    for (int i = 0; i < 1024; i++) fiat_p1024_add_ref(r.w, r.w, r.w);
+    Fe ones;
+    for (int i = 0; i < 15; i++) ones.w[i] = ~0ull;
     ones.w[15] = kP.w[15] - 1;
-    if (below_p(ones)) edge.push_back(ones);
     Fe high{};
-    high.w[15] = kP.w[15];  // p's top word, nothing below: below p since p's lower words are not 0
-    edge.push_back(high);
+    high.w[15] = kP.w[15];
+    std::vector<Fe> edge = {zero, one, two, minus(kP, 1), minus(kP, 2), r, ones, high};
+    for (auto& e : edge) check(below_p(e), v, "edge value below p");
 
     size_t bad = 0, n = 0;
     auto cmp = [&](const Fe& a, const Fe& b) {
@@ -93,13 +93,22 @@ int main() {
     size_t edge_n = n;
 
     bad = 0;
-    for (int i = 0; i < 200000; i++) {
+    for (int i = 0; i < 500000; i++) {  // 10^6 random elements
         Fe a = random_fe(), b = random_fe();
         cmp(a, b);
         if (i % 1000 == 0)
             for (auto& e : edge) { cmp(a, e); cmp(e, a); }
     }
     check(bad == 0, v, "random elements");
+
+    // R mod p is the Montgomery form of 1: a * R / R = a, without the reference.
+    bad = 0;
+    for (int i = 0; i < 1000; i++) {
+        Fe a = random_fe(), x;
+        fiat_p1024_mul(x.w, a.w, r.w);
+        bad += !same(x, a);
+    }
+    check(bad == 0, v, "a times R mod p is a");
 
     // Chains: each result fed to the next, as CTIDH does, mixing the four operations.
     Fe x = random_fe(), y = x, k = random_fe();
