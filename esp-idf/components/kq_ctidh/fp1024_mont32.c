@@ -81,6 +81,58 @@ __attribute__((noinline)) static void mont_mul(uint32_t r[N], const uint32_t a[N
     reduce_once(r, t);
 }
 
+// Montgomery reduction of a 2N-word t < pR: r = t / R mod p.
+__attribute__((noinline)) static void redc(uint32_t r[N], uint32_t t[2 * N]) {
+    uint32_t ec = 0;  // the carry out of the previous round's top word, owed to t[i + N]
+    for (int i = 0; i < N; i++) {
+        uint32_t m = t[i] * PINV, c = 0;
+        for (int j = 0; j < N; j++) {
+            uint32_t lo = m * P[j], hi = mulhi(m, P[j]);
+            uint32_t s1 = t[i + j] + lo, c1 = carry_of(t[i + j], lo, s1);
+            uint32_t s2 = s1 + c, c2 = carry_of(s1, c, s2);
+            t[i + j] = s2;
+            c = hi + c1 + c2;
+        }
+        uint32_t s1 = t[i + N] + c, c1 = carry_of(t[i + N], c, s1);
+        uint32_t s2 = s1 + ec, c2 = carry_of(s1, ec, s2);
+        t[i + N] = s2;
+        ec = c1 | c2;
+    }
+    // t / R < 2p < 2^1021: ec is 0, and one subtraction of p reduces it.
+    reduce_once(r, t + N);
+}
+
+// r = a^2 / R mod p: each cross product a[i] a[j] once, doubled by a shift, plus the diagonal.
+__attribute__((noinline)) static void mont_square(uint32_t r[N], const uint32_t a[N]) {
+    uint32_t t[2 * N];
+    memset(t, 0, sizeof t);
+    for (int i = 0; i < N - 1; i++) {
+        uint32_t ai = a[i], c = 0;
+        for (int j = i + 1; j < N; j++) {
+            uint32_t lo = ai * a[j], hi = mulhi(ai, a[j]);
+            uint32_t s1 = t[i + j] + lo, c1 = carry_of(t[i + j], lo, s1);
+            uint32_t s2 = s1 + c, c2 = carry_of(s1, c, s2);
+            t[i + j] = s2;
+            c = hi + c1 + c2;
+        }
+        t[i + N] = c;
+    }
+    uint32_t c = 0, top = 0;  // top: the bit shifted out of the word below
+    for (int i = 0; i < N; i++) {
+        uint32_t lo = a[i] * a[i], hi = mulhi(a[i], a[i]);
+        uint32_t w0 = t[2 * i], w1 = t[2 * i + 1];
+        uint32_t d0 = (w0 << 1) | top, d1 = (w1 << 1) | (w0 >> 31);
+        top = w1 >> 31;
+        uint32_t s0 = d0 + lo, s0c = s0 + c;
+        c = carry_of(d0, lo, s0) | carry_of(s0, c, s0c);
+        uint32_t s1 = d1 + hi, s1c = s1 + c;
+        c = carry_of(d1, hi, s1) | carry_of(s1, c, s1c);
+        t[2 * i] = s0c;
+        t[2 * i + 1] = s1c;
+    }
+    redc(r, t);  // a^2 < 2^2048: c and top are 0
+}
+
 void fiat_p1024_mul(uint64_t out1[16], const uint64_t arg1[16], const uint64_t arg2[16]) {
     uint32_t a[N], b[N], r[N];
     memcpy(a, arg1, sizeof a);
@@ -92,7 +144,7 @@ void fiat_p1024_mul(uint64_t out1[16], const uint64_t arg1[16], const uint64_t a
 void fiat_p1024_square(uint64_t out1[16], const uint64_t arg1[16]) {
     uint32_t a[N], r[N];
     memcpy(a, arg1, sizeof a);
-    mont_mul(r, a, a);
+    mont_square(r, a);
     memcpy(out1, r, sizeof r);
 }
 
