@@ -3,6 +3,7 @@
 // results come back as inputs, retries and deferred inputs wait for their time. And the
 // Backend the executor runs on a device: boxes through the replica client, vouchers here.
 #pragma once
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <map>
@@ -16,6 +17,8 @@ class Runtime {
 public:
     kq1::Engine eng;
     std::function<void(const kq1::Changes&)> on_changes;
+    // Engine steps taken so far: what a screen compares to know the state moved. Any task.
+    std::atomic<uint32_t> steps{0};
 
     Runtime(kq1::State s, size_t max_plaintext) : eng(std::move(s), max_plaintext) {}
 

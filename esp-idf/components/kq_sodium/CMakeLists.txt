@@ -216,3 +216,10 @@ if(CONFIG_COMPILER_STATIC_ANALYZER AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # due to combinatorial state explosion in the interprocedural analysis
     target_compile_options(${COMPONENT_LIB} PRIVATE "-fno-analyzer")
 endif()
+
+# libsodium's NaCl-compatible randombytes() is a global name other straddles define too (sshd);
+# nothing here calls it, so it is renamed out of their way. randombytes_buf() is untouched.
+set_source_files_properties(
+    ${SRC}/randombytes/randombytes.c
+    PROPERTIES COMPILE_DEFINITIONS randombytes=kq_sodium_nacl_randombytes
+    )

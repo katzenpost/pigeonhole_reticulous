@@ -24,6 +24,7 @@
 
 #include "kq_replica.h"
 #include "kq_runtime.h"
+#include "kq_view.h"
 
 static const char* TAG = "kq";
 static constexpr char kAspect[] = "pigeonhole.replica";
@@ -275,26 +276,63 @@ static void onCmd(const char* key, const char* val) {
 
 // ---- CLI ----
 
-static void printChats(const std::string& only, bool lines) {
+uint32_t kqGeneration() { return s_rt ? s_rt->steps.load() : 0; }
+
+std::vector<KqChat> kqChats(const std::string& only, bool lines) {
+    std::vector<KqChat> out;
+    if (!s_mu || !s_rt) return out;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     for (auto& c : s_rt->eng.state.chats) {
         if (!only.empty() && c.id != only) continue;
-        std::string st = c.group ? "joined" : "not joined";
-        if (c.joining) st += c.joining->code.empty() ? ", minting a voucher" : ", voucher " + c.joining->code;
-        if (c.inducting) st += ", adding a member";
-        if (!c.jobs.empty()) st += ", " + std::to_string(c.jobs.size()) + " to write";
-        cliPrintf("%s: %s, %u members\n", c.id.c_str(), st.c_str(), c.group ? (unsigned)c.group->readers.size() : 0u);
-        if (!lines) continue;
-        for (auto& l : c.log) {
-            if (l.notice) { cliPrintf("  — %s\n", kq1::plain(*l.notice).c_str()); continue; }
-            bool mine = c.group && c.group->me() == l.sender;
-            const std::string* n = c.names.get(l.sender);
-            std::string who = mine ? "me" : n ? *n : "?";
-            const char* mark = !mine ? "" : l.status == kq1::Status::Pending ? " …" : c.acknowledged(l) ? " ✓✓" : " ✓";
-            cliPrintf("  %s%s: %s\n", who.c_str(), mark, l.text.c_str());
+        KqChat k;
+        k.id = c.id;
+        k.joined = c.group.has_value();
+        k.adding = c.inducting.has_value();
+        if (c.joining) k.voucher = c.joining->code.empty() ? "\xE2\x80\xA6" : c.joining->code;
+        k.members = c.group ? (unsigned)c.group->readers.size() : 0;
+        k.pending = (unsigned)c.jobs.size();
+        if (lines) {
+            for (auto& l : c.log) {
+                KqLine x;
+                if (l.notice) {
+                    x.notice = true;
+                    x.text = kq1::plain(*l.notice);
+                } else {
+                    x.mine = c.group && c.group->me() == l.sender;
+                    const std::string* n = c.names.get(l.sender);
+                    x.who = x.mine ? "me" : n ? *n : "?";
+                    x.text = l.text;
+                    if (x.mine)
+                        x.mark = l.status == kq1::Status::Pending ? KqLine::PENDING
+                               : c.acknowledged(l) ? KqLine::READ : KqLine::WRITTEN;
+                }
+                k.lines.push_back(std::move(x));
+            }
         }
+        out.push_back(std::move(k));
     }
     xSemaphoreGive(s_mu);
+    return out;
+}
+
+void kqCommand(const char* verb, const std::string& group, const std::string& arg) {
+    std::string v = arg.empty() ? group : group + "|" + arg;
+    storageSet((std::string("kq.cmd.") + verb).c_str(), v.c_str());
+}
+
+static void printChats(const std::string& only, bool lines) {
+    static const char* marks[] = {"", " \xE2\x80\xA6", " \xE2\x9C\x93", " \xE2\x9C\x93\xE2\x9C\x93"};
+    for (auto& c : kqChats(only, lines)) {
+        std::string st = c.joined ? "joined" : "not joined";
+        if (!c.voucher.empty()) st += ", voucher " + c.voucher;
+        if (c.adding) st += ", adding a member";
+        if (c.pending) st += ", " + std::to_string(c.pending) + " to write";
+        cliPrintf("%s: %s, %u members\n", c.id.c_str(), st.c_str(), c.members);
+        for (auto& l : c.lines) {
+            if (l.notice) cliPrintf("  \xE2\x80\x94 %s\n", l.text.c_str());
+            else cliPrintf("  %s%s: %s\n", l.who.c_str(), marks[l.mark], l.text.c_str());
+        }
+    }
 }
 
 static void cliKq(const char* args) {
@@ -306,11 +344,11 @@ static void cliKq(const char* args) {
     std::string group = rest.substr(0, sp), arg = sp == std::string::npos ? "" : rest.substr(sp + 1);
     if (verb == "probe") { storageSet("kq.cmd.probe", "1"); cliPrintf("probe queued; `kq` shows the result\n"); return; }
     if ((verb == "create" || verb == "join" || verb == "scan" || verb == "leave") && !group.empty()) {
-        storageSet(("kq.cmd." + verb).c_str(), group.c_str());
+        kqCommand(verb.c_str(), group);
         return;
     }
     if ((verb == "invite" || verb == "send") && !group.empty() && !arg.empty()) {
-        storageSet(("kq.cmd." + verb).c_str(), (group + "|" + arg).c_str());
+        kqCommand(verb.c_str(), group, arg);
         return;
     }
     if (verb == "groups") { printChats("", false); return; }
