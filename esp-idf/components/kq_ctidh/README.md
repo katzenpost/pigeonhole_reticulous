@@ -59,4 +59,7 @@ xtensa against mont32, in `test_apps/field`'s image: `.iram0.text` −44 B, `.dr
   `one-insn-per-tb` is needed for xtensa: its MAC16 load-and-multiply instructions often load
   one of their own source registers, which the ISA defines, and QEMU 9.2.2 gets that wrong
   between the instructions of one translation block.
+- The voucher's CTIDH on the ESP32-S3, in QEMU: `make -C esp-idf/test/qemu-voucher run` runs
+  `test/host/test_voucher.cpp` (mint, induct, sealed reply and open, both forms, against hpqc's
+  vectors) with the field the firmware takes there, its stack in PSRAM as on the device.
 - Timing: `kq bench field|ctidh` on a device, `esp-idf/test/bench` on the host.
