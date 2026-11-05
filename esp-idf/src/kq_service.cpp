@@ -26,6 +26,7 @@
 
 #include <sodium.h>
 
+#include "kq1_voucher.h"
 #include "kq_bacap.h"
 #include "kq_nike.h"
 #include "kq_probe.h"
@@ -497,13 +498,47 @@ static void benchBacap() {
     benchOp("pad a box", 100, [&] { kq::wire::pad(text.data(), text.size(), s_client->box_size()); });
 }
 
-enum BenchKind { BENCH_FIELD, BENCH_CTIDH, BENCH_BACAP };
+// A voucher join's CTIDH with a seal's two actions in turn, then at once: the inductee's induct (the
+// payload's key checked, then the seal), and the minter's open without the seal public key at hand.
+// One seed both ways, so the outputs must match bit for bit.
+static void benchJoin() {
+    namespace v = kq1::voucher;
+    auto rnd = [](uint8_t* p, size_t n) { randombytes_buf(p, n); };
+    kq::Bytes cap = kq::bacap::WriteCap::generate(rnd).bytes(), who(32, 7), salt(v::kSaltSize);
+    randombytes_buf(salt.data(), salt.size());
+    uint8_t seed[32];
+    randombytes_buf(seed, sizeof seed);
+    int64_t t0 = esp_timer_get_time();
+    auto m = v::mint(cap, "bench", v::COMPACT, rnd);
+    info("bench: join mint (one action) %.1f s", (esp_timer_get_time() - t0) / 1e6);
+    if (!m) return;
+    auto saved = kq::nike::both;  // a join running meanwhile takes this bench's mode: the same results
+    kq::Bytes sealed[2], opened[2];
+    for (int cores = 1; cores <= 2; cores++) {
+        kq::nike::both = cores == 1 ? kq::nike::in_turn : kq::nike::at_once;
+        kq::nike::Shake sh(seed, sizeof seed);
+        t0 = esp_timer_get_time();
+        auto r = v::induct(m->voucher.data(), m->payload, who, salt, sh.rng());
+        int64_t t1 = esp_timer_get_time();
+        auto o = r ? v::open_reply(m->secret_key, {}, r->sealed, cap) : std::nullopt;
+        int64_t t2 = esp_timer_get_time();
+        info("bench: join %d core%s: induct %.1f s, open %.1f s, both %.1f s", cores, cores == 1 ? " " : "s",
+             (t1 - t0) / 1e6, (t2 - t1) / 1e6, (t2 - t0) / 1e6);
+        if (r) sealed[cores - 1] = r->sealed;
+        if (o) opened[cores - 1] = o->mutated_write_cap;
+    }
+    kq::nike::both = saved;
+    bool same = !sealed[0].empty() && sealed[0] == sealed[1] && !opened[0].empty() && opened[0] == opened[1];
+    info("bench: join outputs %s", same ? "the same, bit for bit" : "DIFFER");
+}
+
+enum BenchKind { BENCH_FIELD, BENCH_CTIDH, BENCH_BACAP, BENCH_JOIN };
 
 static void benchMain(void* arg) {
     auto kind = (BenchKind)(intptr_t)arg;
     pmBoost();
-    if (kind == BENCH_BACAP) {
-        benchBacap();
+    if (kind == BENCH_BACAP || kind == BENCH_JOIN) {
+        kind == BENCH_BACAP ? benchBacap() : benchJoin();
         info("bench: done");
         pmBoostEnd();
         s_bench = nullptr;
@@ -541,12 +576,12 @@ static void cliBench(const std::string& what) {
         cliPrintf("kq bench radio: %s rounds queued; `kq` and `log` show the result\n", n.c_str());
         return;
     }
-    if (what != "field" && what != "ctidh" && what != "bacap") {
-        cliPrintf("kq bench field | ctidh | bacap | radio [rounds]\n");
+    if (what != "field" && what != "ctidh" && what != "bacap" && what != "join") {
+        cliPrintf("kq bench field | ctidh | bacap | join | radio [rounds]\n");
         return;
     }
     if (s_bench) { cliPrintf("kq bench: one is running; `log` shows it\n"); return; }
-    BenchKind k = what == "ctidh" ? BENCH_CTIDH : what == "bacap" ? BENCH_BACAP : BENCH_FIELD;
+    BenchKind k = what == "ctidh" ? BENCH_CTIDH : what == "bacap" ? BENCH_BACAP : what == "join" ? BENCH_JOIN : BENCH_FIELD;
     s_bench = spawnTask(benchMain, "kq.bench", kHeavyStack, (void*)(intptr_t)k, 1, 1, STACK_PSRAM);
     cliPrintf(s_bench ? "kq bench %s: started; the results go to the log\n" : "kq bench %s: no memory for the task\n",
               what.c_str());
@@ -600,7 +635,7 @@ static void cliKq(const char* args) {
     if (!a.empty() && verb != "status") {
         cliPrintf("kq [status] | probe [rounds] | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n"
                   "   | sendfile <g> <path>\n"
-                  "   | bench field | ctidh | bacap | radio [rounds] | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
+                  "   | bench field | ctidh | bacap | join | radio [rounds] | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
         return;
     }
     static const char* locks[] = {"starting", "no choice made yet: kq setup none | kq setup passphrase <p>",
@@ -687,7 +722,12 @@ void KqService::onInit() {
     storageDefault("s.kq.box_size", 1549);
     storageDefault("s.kq.name", "kq");
     storageDefault("s.kq.wire_version", 4);
+    storageDefault("s.kq.cores", 2);
     storageEnd();
+    // s.kq.cores 1 runs a seal's two CTIDH actions in turn on the worker's core, to compare with 2.
+    kq::nike::both = [](const kq::nike::Fn& a, const kq::nike::Fn& b) {
+        (storageGetInt("s.kq.cores", 2) == 1 ? kq::nike::in_turn : kq::nike::at_once)(a, b);
+    };
     s_client = new kq::ReplicaClient((size_t)storageGetInt("s.kq.box_size", 1549), sendFrame);
     s_probe = new kq::Probe(*s_client, nowMs, [](uint8_t* p, size_t n) { randombytes_buf(p, n); });
     s_mu = xSemaphoreCreateMutex();
