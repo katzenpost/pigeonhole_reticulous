@@ -173,6 +173,7 @@ static void openChannel() {
 
 static kq::Runtime* s_rt = nullptr;
 static kq::Store* s_store = nullptr;  // once the chats are open
+static kq::Vault* s_vault = nullptr;
 static kq::ReplicaBackend* s_backend = nullptr;
 static SemaphoreHandle_t s_mu = nullptr;  // the engine's state, which the CLI reads
 static QueueHandle_t s_lightQ = nullptr, s_heavyQ = nullptr, s_doneQ = nullptr, s_bridgeQ = nullptr;
@@ -325,8 +326,6 @@ static kq::StoreFiles fsFiles(const std::string& dir) {
     f.remove = [path](const std::string& n) { fs_remove(path(n).c_str()); };
     return f;
 }
-
-static kq::Vault* s_vault = nullptr;
 
 // On the kq task, once the vault opens: what was saved becomes the runtime's state, and every
 // step's changes are saved before its actions are handed out.
