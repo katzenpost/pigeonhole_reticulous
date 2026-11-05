@@ -15,13 +15,18 @@
 #include <deque>
 #include <future>
 #include <mutex>
+#include <set>
+#include <algorithm>
 #include <thread>
 
 #include "kq_runtime.h"
 #include "kq_store.h"
 #include "kq_vault.h"
+#include "kq_ogg.h"
 #include "kq_view.h"
 #include "sim.h"
+
+void simHear(kq1::Clip&& c);
 
 namespace {
 
@@ -133,6 +138,7 @@ void loadChats() {
     g_rt->eng.state = g_store->load(g_name, &problems);
     for (auto& p : problems) fprintf(stderr, "sim: not loaded: %s\n", p.c_str());
     fprintf(stderr, "sim: %zu chats loaded\n", g_rt->eng.state.chats.size());
+    g_rt->on_clip = [](kq1::Clip&& c) { simHear(std::move(c)); };
     g_rt->on_changes = [](const kq1::Changes& ch) {
         if (!g_store->commit(g_rt->eng.state, ch)) fprintf(stderr, "sim: saving the chats failed\n");
     };
@@ -203,6 +209,40 @@ uint32_t kqGeneration() { return g_rt ? g_rt->steps.load() : 0; }
 std::vector<KqChat> kqChats(const std::string& only, bool lines) {
     std::lock_guard<std::mutex> g(g_mu);
     return kq::chats(g_rt->eng.state, only, lines);
+}
+
+// The radio: the sim has no audio, so a burst is counted, its length read, and dropped.
+namespace {
+std::vector<std::string> g_radio;
+KqRadio g_radioState;
+}
+
+void simHear(kq1::Clip&& c) {
+    auto o = kq::ogg::demux(c.bytes.data(), c.bytes.size());
+    uint64_t us = 0;
+    if (o) for (auto& p : o->packets) us += kq::ogg::packet_us(p);
+    char line[160];
+    snprintf(line, sizeof line, "%s, %.1f s: fetched; no audio in the sim", c.who.c_str(), us / 1e6);
+    g_radioState.heard++;
+    g_radioState.last = line;
+    fprintf(stderr, "sim: radio: %s\n", line);
+}
+
+std::vector<std::string> kqRadioGroups() {
+    std::lock_guard<std::mutex> g(g_mu);
+    return g_radio;
+}
+
+void kqRadioSet(const std::string& group, bool on) {
+    std::lock_guard<std::mutex> g(g_mu);
+    g_radio.erase(std::remove(g_radio.begin(), g_radio.end(), group), g_radio.end());
+    if (on) g_radio.push_back(group);
+    g_rt->eng.radio = std::set<std::string>(g_radio.begin(), g_radio.end());
+}
+
+KqRadio kqRadio() {
+    std::lock_guard<std::mutex> g(g_mu);
+    return g_radioState;
 }
 
 void kqCommand(const char* verb, const std::string& group, const std::string& arg) {

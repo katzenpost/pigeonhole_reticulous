@@ -212,6 +212,7 @@ struct Engine::Cx {
     const std::string& me;
     uint64_t version;
     size_t max_file;
+    const std::set<ChatId>& radio;
 
     void emit(Action a) { out.actions.push_back(std::move(a)); }
     void keep(std::string file, Bytes bytes) { out.files.push_back({std::move(file), std::move(bytes)}); }
@@ -320,6 +321,10 @@ struct Engine::Cx {
         auto it = flight.arriving.find({sender, index});
         if (it != flight.arriving.end()) f->payload = it->second;
         std::string name = safe_name(f->basename);
+        if (radio.count(c.id) && f->filetype == "audio/opus" && !(c.group && c.group->me() == sender)) {
+            out.clips.push_back({c.id, sender, label(c, sender), name, std::move(f->payload)});
+            return;
+        }
         Attachment a{name, f->filetype, f->payload.size(), attachment_file(c, c.next_id, now, name)};
         if (f->payload.size() > max_file) {
             l.text = "[file " + name + ", " + size_text(a.size) + ", too large to keep]";
@@ -634,7 +639,8 @@ struct Engine::Cx {
         Action a(Action::WAKE);
         a.chat = c.id;
         a.stream = stream;
-        a.ms = backoff(missed(c, stream));
+        size_t n = missed(c, stream);
+        a.ms = radio.count(c.id) ? RADIO_POLL_MS : backoff(n);
         emit(a);
     }
     void read(Chat& c, const Key& stream, const Index& index, const Outcome& outcome) {
@@ -684,7 +690,7 @@ static std::optional<std::pair<Group, ReplyWho>> joined_from(const Opened& o) {
 }
 
 void Engine::pump(StepResult& out, int64_t now) {
-    Cx cx{out, flight_, now, max_plaintext, state.me, wire_version, max_file};
+    Cx cx{out, flight_, now, max_plaintext, state.me, wire_version, max_file, radio};
     for (auto& c : state.chats) {
         cx.start_write(c);
         cx.start_reads(c);
@@ -757,7 +763,7 @@ StepResult Engine::resume(int64_t now) {
 
 void Engine::handle(StepResult& out, int64_t now, const Input& input) {
     const std::string me = state.me;
-    Cx cx{out, flight_, now, max_plaintext, me, wire_version, max_file};
+    Cx cx{out, flight_, now, max_plaintext, me, wire_version, max_file, radio};
     switch (input.kind) {
         case Input::CREATE:
         case Input::JOIN: {

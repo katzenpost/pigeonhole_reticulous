@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// The T-Deck's screen on the desktop: KqApp on a 320x240 LVGL display drawn in memory, below a
+// The T-Deck's screen on the desktop: KqApp (or KqRadioApp, --app radio) on a 320x240 LVGL display drawn in memory, below a
 // status bar, with the board's keypad and pointer fed from commands on standard input:
 //   type <text> | key enter|esc|tab|backtab|up|down|left|right|bs | click <x> <y> | back
 //   shot <file.png> | sleep <s> | until <text> <s> | dump | quit
@@ -18,6 +18,7 @@
 #include <thread>
 
 #include "kq_app.h"
+#include "kq_radio_app.h"
 #include "kq_view.h"
 #include "lcd.h"
 #include "lcd_internal.h"
@@ -140,16 +141,17 @@ static std::mutex s_inMu;
 static std::deque<std::string> s_in;
 
 int main(int argc, char** argv) {
-    std::string socketPath, name = "tdeck", stateDir;
+    std::string socketPath, name = "tdeck", stateDir, appName = "chat";
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string a = argv[i];
         if (a == "--socket") socketPath = argv[i + 1];
         else if (a == "--name") name = argv[i + 1];
         else if (a == "--fonts") g_fonts = argv[i + 1];
         else if (a == "--state") stateDir = argv[i + 1];
+        else if (a == "--app") appName = argv[i + 1];
     }
     if (socketPath.empty() || g_fonts.empty() || stateDir.empty()) {
-        fprintf(stderr, "usage: kq-sim --socket <relay socket> --fonts <spangap-lcd fonts dir> --state <dir> [--name <name>]\n");
+        fprintf(stderr, "usage: kq-sim --socket <relay socket> --fonts <spangap-lcd fonts dir> --state <dir> [--name <name>] [--app chat|radio]\n");
         return 2;
     }
     simClientStart(socketPath, name, 1549, stateDir);
@@ -195,7 +197,9 @@ int main(int argc, char** argv) {
     lv_obj_set_size(root, W, H - kStatusH);
     lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
 
-    KqApp app;
+    KqApp chat;
+    KqRadioApp radio;
+    LcdApp& app = appName == "radio" ? static_cast<LcdApp&>(radio) : static_cast<LcdApp&>(chat);
     app.onCreate(root);
     app.onShow();
 

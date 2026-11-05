@@ -15,3 +15,6 @@ services:
   - { class: KqService, header: kq_service.h }
   # KqApp is the launcher tile, compiled only when the lcd straddle is staged (conditional/spangap-lcd/).
   - { class: KqApp, header: kq_app.h, when: spangap/spangap-lcd }
+  # The radio, compiled only when the lxst voice session is staged (conditional/lxst/): voice builds.
+  - { class: KqRadioService, header: kq_radio.h, when: reticulous/lxst }
+  - { class: KqRadioApp, header: kq_radio_app.h, when: reticulous/lxst }

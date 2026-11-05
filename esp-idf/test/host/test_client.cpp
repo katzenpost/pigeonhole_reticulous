@@ -7,6 +7,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 
 #include "kq1_engine.h"
@@ -145,6 +146,7 @@ struct Client {
     std::shared_ptr<std::map<std::string, std::string>> files = std::make_shared<std::map<std::string, std::string>>();
     std::shared_ptr<kq::Store> store = std::make_shared<kq::Store>(kq::memory_files(*files));
     std::shared_ptr<std::map<std::string, Bytes>> kept = std::make_shared<std::map<std::string, Bytes>>();  // its files
+    std::vector<Clip> clips;  // radio bursts handed out to play
 };
 
 static int g_saved = 0, g_unsaved = 0;
@@ -181,6 +183,7 @@ struct World {
         (same ? g_saved : g_unsaved)++;
         if (!same) fprintf(stderr, "%s: the saved state differs from the state after a step\n", m.name.c_str());
         for (auto& f : res.files) (*m.kept)[f.file] = f.bytes;
+        for (auto& c : res.clips) m.clips.push_back(c);
         for (auto& a : res.actions) queue.push_back({i, a});
     }
     bool act() {
@@ -535,6 +538,13 @@ static void file_tests(const char* out_path) {
         check(file(w, 0, "cat.png") == pic && w.chat(0, "g")->jobs.empty() && spooled(w, 0) == 0, v,
               "the sender keeps its copy, and the spool is emptied");
         check(says(w, 1, "[file cat.png, 20 KB]"), v, "the line names it");
+        // A radio group is polled every second however long it has been quiet; the least backoff is 2 s.
+        w.members[1].eng.radio.insert("g");
+        w.run_to(w.clock + 600000);
+        uint64_t bob = 0;
+        for (auto& l : w.later)
+            if (l.in && l.in->kind == Input::WAKE && l.who == 1) bob = std::max(bob, l.due - w.clock);
+        check(bob == RADIO_POLL_MS && backoff(0) > RADIO_POLL_MS, v, "radio polls every second");
         // What the C++ engine wrote, for pigeonhole_protocols to read (filevec read).
         if (out_path) {
             Bytes ibox;
@@ -571,6 +581,30 @@ static void file_tests(const char* out_path) {
         std::reverse(w.queue.begin(), w.queue.end());
         w.run_to(w.clock + 600000);
         check(file(w, 1, "big.bin") == doc, v, "chunks landing out of order");
+    }
+    {
+        // A voice burst in a radio group is handed out to play, and nothing of it is kept: no
+        // file, no line, nothing in the saved state. Other files there are kept as anywhere.
+        World w;
+        found_and_join(w);
+        w.members[1].eng.radio.insert("g");
+        std::ifstream in("vectors/hushphone/tone.opus", std::ios::binary);
+        Bytes clip((std::istreambuf_iterator<char>(in)), {});
+        send_file(w, 0, "21eae8f1c3d04dd5.opus", clip);
+        send_file(w, 0, "a.png", bytes_of(500, 7));
+        w.run_to(w.clock + 600000);
+        auto& bob = w.members[1];
+        check(clip.size() == 1668 && bob.clips.size() == 1 && bob.clips[0].bytes == clip && bob.clips[0].chat == "g" &&
+                  bob.clips[0].sender == w.chat(0, "g")->group->me(), v, "a radio burst is handed out whole");
+        bool line = false;
+        for (auto& l : w.chat(1, "g")->log) line |= l.text.find(".opus") != std::string::npos;
+        std::string raw(clip.begin() + 200, clip.begin() + 232), hex = tohex(Bytes(clip.begin() + 200, clip.begin() + 232));
+        bool stored = false;
+        for (auto& [_, d] : *bob.files) stored |= d.find(raw) != std::string::npos || d.find(hex) != std::string::npos;
+        for (auto& [_, d] : *bob.kept) stored |= d == clip || std::string(d.begin(), d.end()).find(raw) != std::string::npos;
+        check(!line && !stored, v, "and is not kept: no line, no file, nothing in the saved state");
+        check(file(w, 1, "a.png") == bytes_of(500, 7) && file(w, 0, "21eae8f1c3d04dd5.opus") == clip, v,
+              "an image in a radio group is kept, and so is the sender's own burst");
     }
     {
         World w;
