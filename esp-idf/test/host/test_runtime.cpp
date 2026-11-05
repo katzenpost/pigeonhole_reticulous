@@ -88,6 +88,12 @@ int main(int, char**) {
     check(!code.empty(), v, "bob has a voucher code");
     printf("bob's voucher code: %s\n", code.c_str());
 
+    Input bad = make(Input::INDUCT);
+    bad.code = "AAAA";  // base64, but 3 bytes and not a voucher's 32
+    alice.in(bad, t);
+    auto last = alice.chat() && !alice.chat()->log.empty() ? alice.chat()->log.back().notice : std::nullopt;
+    check(last && last->kind == NoticeKind::NotAVoucher && !alice.chat()->inducting, v, "a short code is not a voucher");
+
     // As hushphone shows a code: in groups of eight, and pasted with its newline.
     std::string grouped;
     for (size_t i = 0; i < code.size(); i += 8) grouped += (i ? " " : "") + code.substr(i, 8);
