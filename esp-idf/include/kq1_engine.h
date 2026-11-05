@@ -105,7 +105,7 @@ struct Action {
 
 struct FileWrite { std::string file; Bytes bytes; };
 // A voice burst heard in a radio group: held in memory to be played, never kept.
-struct Clip { ChatId chat; Key sender; std::string name; Bytes bytes; };
+struct Clip { ChatId chat; Key sender; std::string who, name; Bytes bytes; };  // who: ~name, as notices say
 // What a step changed, for the caller to save: chats, and log lines changed or dropped.
 struct Changes {
     std::set<ChatId> chats, removed;

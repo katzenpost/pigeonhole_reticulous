@@ -5,10 +5,12 @@
 // here, since the Channel's ITS handle belongs to this task.
 #include "kq_service.h"
 
+#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <ctime>
 #include <map>
+#include <set>
 #include <string>
 
 #include "esp_random.h"
@@ -345,6 +347,7 @@ static void loadChats() {
     std::vector<std::string> problems;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_rt->eng.state = s_store->load(storageGetStr("s.kq.name", "kq"), &problems);
+    s_rt->on_clip = [](kq1::Clip&& c) { kqRadioHear(std::move(c)); };
     s_rt->on_file = [](const kq1::FileWrite& f) {
         if (!s_vault->files().replace(f.file, std::string(f.bytes.begin(), f.bytes.end())))
             err("kq: keeping %s failed", f.file.c_str());
@@ -379,6 +382,53 @@ KqLock kqLock(std::string* why) {
 }
 void kqSetup(const std::string& passphrase) { if (s_vault) { s_vault->ask_setup(passphrase); wake(); } }
 void kqUnlock(const std::string& passphrase) { if (s_vault) { s_vault->ask_unlock(passphrase); wake(); } }
+
+// ---- the radio: the groups in s.kq.radio, comma-separated; playing is the voice slice's ----
+
+// Without the voice slice (conditional/lxst/) bursts are dropped unheard.
+__attribute__((weak)) void kqRadioHear(kq1::Clip&&) {}
+__attribute__((weak)) KqRadio kqRadio() { return {}; }
+
+std::vector<std::string> kqRadioGroups() {
+    std::vector<std::string> out;
+    std::string all = storageGetStr("s.kq.radio", "");
+    for (size_t p = 0, q; p < all.size(); p = q + 1) {
+        q = all.find(',', p);
+        if (q == std::string::npos) q = all.size();
+        if (q > p) out.push_back(all.substr(p, q - p));
+    }
+    return out;
+}
+
+static void applyRadio() {
+    auto gs = kqRadioGroups();
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    s_rt->eng.radio = std::set<std::string>(gs.begin(), gs.end());
+    xSemaphoreGive(s_mu);
+}
+
+void kqRadioSet(const std::string& group, bool on) {
+    auto gs = kqRadioGroups();
+    gs.erase(std::remove(gs.begin(), gs.end(), group), gs.end());
+    if (on) gs.push_back(group);
+    std::string all;
+    for (auto& g : gs) all += (all.empty() ? "" : ",") + g;
+    storageSet("s.kq.radio", all.c_str());
+    applyRadio();
+}
+
+static void cliRadio(const std::string& how, const std::string& group) {
+    if ((how == "on" || how == "off") && !group.empty()) kqRadioSet(group, how == "on");
+    else if (!how.empty()) { cliPrintf("kq radio [on <g> | off <g>]\n"); return; }
+    std::string gs;
+    for (auto& g : kqRadioGroups()) gs += (gs.empty() ? "" : ", ") + g;
+    KqRadio r = kqRadio();
+    cliPrintf("radio groups: %s%s\n", gs.empty() ? "none" : gs.c_str(), r.voice ? "" : " (no voice in this image)");
+    if (!r.voice) return;
+    cliPrintf("playing: %s; queued %u, heard %u, missed %u\n", r.playing.empty() ? "-" : r.playing.c_str(), r.queued,
+              r.heard, r.missed);
+    if (!r.last.empty()) cliPrintf("last: %s\n", r.last.c_str());
+}
 
 void kqCommand(const char* verb, const std::string& group, const std::string& arg) {
     std::string v = arg.empty() ? group : group + "|" + arg;
@@ -630,11 +680,12 @@ static void cliKq(const char* args) {
         kqCommand(verb == "sendfile" ? "file" : verb.c_str(), group, arg);
         return;
     }
+    if (verb == "radio") { cliRadio(group, arg); return; }
     if (verb == "groups") { printChats("", false); return; }
     if (verb == "log" && !group.empty()) { printChats(group, true); return; }
     if (!a.empty() && verb != "status") {
         cliPrintf("kq [status] | probe [rounds] | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n"
-                  "   | sendfile <g> <path>\n"
+                  "   | sendfile <g> <path> | radio [on <g> | off <g>]\n"
                   "   | bench field | ctidh | bacap | join | radio [rounds] | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
         return;
     }
@@ -739,6 +790,7 @@ void KqService::onInit() {
     s_rt = new kq::Runtime(kq1::State{storageGetStr("s.kq.name", "kq"), {}}, s_client->box_size());
     // A file is held whole in PSRAM as it is sent or fetched.
     s_rt->eng.max_file = 1 << 20;
+    applyRadio();
     cliRegisterCmd("kq", cliKq);
     rnsServiceRegister(TAG, kqStart, kqStop);
 }

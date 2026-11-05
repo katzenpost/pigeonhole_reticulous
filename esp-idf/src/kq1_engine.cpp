@@ -322,7 +322,7 @@ struct Engine::Cx {
         if (it != flight.arriving.end()) f->payload = it->second;
         std::string name = safe_name(f->basename);
         if (radio.count(c.id) && f->filetype == "audio/opus" && !(c.group && c.group->me() == sender)) {
-            out.clips.push_back({c.id, sender, name, std::move(f->payload)});
+            out.clips.push_back({c.id, sender, label(c, sender), name, std::move(f->payload)});
             return;
         }
         Attachment a{name, f->filetype, f->payload.size(), attachment_file(c, c.next_id, now, name)};
