@@ -290,7 +290,7 @@ fp1024_scan:
     .size   fp1024_scan, . - fp1024_scan
 
 // out = a + b mod p. s = a + b goes to out and d = s - p to the frame; then out = d unless
-// d borrowed.
+// d borrowed. Four words per loop trip.
     .align  4
     .global fiat_p1024_add
     .type   fiat_p1024_add, @function
@@ -302,10 +302,11 @@ fiat_p1024_add:
     movi    a8, 0               // borrow
     movi    a9, -1
     movi    a10, 1
-    movi    a11, N
+    movi    a11, N / 4
     loop    a11, 1f
-    l32i    a12, a3, 0
-    l32i    a13, a4, 0
+    .irp    o, 0, 4, 8, 12
+    l32i    a12, a3, \o
+    l32i    a13, a4, \o
     add     a14, a12, a13
     add     a14, a14, a7        // s
     or      a11, a12, a13
@@ -314,38 +315,41 @@ fiat_p1024_add:
     and     a11, a11, a15
     or      a11, a11, a12
     srli    a7, a11, 31         // carry out of s (Hacker's Delight 2-13)
-    l32i    a15, a5, 0
+    l32i    a15, a5, \o
     add     a15, a15, a8        // p_j + borrow cannot wrap
     sub     a11, a14, a15
-    s32i    a14, a2, 0
-    s32i    a11, a6, 0
+    s32i    a14, a2, \o
+    s32i    a11, a6, \o
     minu    a11, a14, a15
     sub     a11, a15, a11
     minu    a8, a11, a10        // s_j < p_j + borrow
-    addi    a3, a3, 4
-    addi    a4, a4, 4
-    addi    a5, a5, 4
-    addi    a6, a6, 4
-    addi    a2, a2, 4
+    .endr
+    addi    a3, a3, 16
+    addi    a4, a4, 16
+    addi    a5, a5, 16
+    addi    a6, a6, 16
+    addi    a2, a2, 16
 1:
     addi    a2, a2, -128
     neg     a8, a8              // all ones: s < p, keep s
     mov     a6, a1
-    movi    a11, N
+    movi    a11, N / 4
     loop    a11, 1f
-    l32i    a12, a2, 0
-    l32i    a13, a6, 0
+    .irp    o, 0, 4, 8, 12
+    l32i    a12, a2, \o
+    l32i    a13, a6, \o
     xor     a12, a12, a13
     and     a12, a12, a8
     xor     a12, a12, a13
-    s32i    a12, a2, 0
-    addi    a2, a2, 4
-    addi    a6, a6, 4
+    s32i    a12, a2, \o
+    .endr
+    addi    a2, a2, 16
+    addi    a6, a6, 16
 1:
     retw
     .size   fiat_p1024_add, . - fiat_p1024_add
 
-// out = a - b mod p: d = a - b, then p added back under the borrow's mask.
+// out = a - b mod p: d = a - b, then p added back under the borrow's mask. Four words per trip.
     .align  4
     .global fiat_p1024_sub
     .type   fiat_p1024_sub, @function
@@ -353,10 +357,11 @@ fiat_p1024_sub:
     entry   a1, 32
     mov     a5, a2
     movi    a8, 0               // borrow
-    movi    a11, N
+    movi    a11, N / 4
     loop    a11, 1f
-    l32i    a12, a3, 0
-    l32i    a13, a4, 0
+    .irp    o, 0, 4, 8, 12
+    l32i    a12, a3, \o
+    l32i    a13, a4, \o
     sub     a14, a12, a13
     sub     a14, a14, a8        // d
     xor     a15, a12, a13
@@ -364,28 +369,31 @@ fiat_p1024_sub:
     and     a9, a9, a15
     xor     a9, a9, a14
     srli    a8, a9, 31          // borrow: d's top bit where a and b agree there, else b's
-    s32i    a14, a5, 0
-    addi    a3, a3, 4
-    addi    a4, a4, 4
-    addi    a5, a5, 4
+    s32i    a14, a5, \o
+    .endr
+    addi    a3, a3, 16
+    addi    a4, a4, 16
+    addi    a5, a5, 16
 1:
     neg     a8, a8
     movi    a3, .Lp
     movi    a7, 0               // carry
     movi    a10, 1
-    movi    a11, N
+    movi    a11, N / 4
     loop    a11, 1f
-    l32i    a12, a2, 0
-    l32i    a13, a3, 0
+    .irp    o, 0, 4, 8, 12
+    l32i    a12, a2, \o
+    l32i    a13, a3, \o
     and     a13, a13, a8
     add     a13, a13, a7        // (p_j & mask) + carry cannot wrap
     add     a14, a12, a13
     minu    a15, a14, a12
     sub     a15, a12, a15
     minu    a7, a15, a10        // the sum wrapped
-    s32i    a14, a2, 0
-    addi    a2, a2, 4
-    addi    a3, a3, 4
+    s32i    a14, a2, \o
+    .endr
+    addi    a2, a2, 16
+    addi    a3, a3, 16
 1:
     retw
     .size   fiat_p1024_sub, . - fiat_p1024_sub
