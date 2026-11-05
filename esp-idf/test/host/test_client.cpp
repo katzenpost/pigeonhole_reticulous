@@ -11,6 +11,8 @@
 #include <sstream>
 
 #include "kq1_engine.h"
+#include "kq_ogg.h"
+#include "kq_radio_feed.h"
 #include "kq_store.h"
 #include "vectors.h"
 
@@ -505,6 +507,23 @@ static std::vector<Bytes> substream_of(const World& w, const Bytes& ibox) {
     return out;
 }
 
+// What the C++ engine wrote for an upload, for pigeonhole_protocols to read (filevec read).
+static std::vector<Json> g_dump;
+static void dump_upload(const World& w, const std::string& what, const std::string& type, const std::string& name,
+                        const Bytes& payload, size_t want) {
+    Vec v{"client", "files", {}};
+    Bytes ibox;
+    for (auto& [k, b] : w.sim.boxes)
+        if (!b.second.empty() && b.second[0] == 'I') ibox = b.second;
+    auto chunks = substream_of(w, ibox);
+    check(chunks.size() == want, v, "the substream as written");
+    std::vector<Json> cs;
+    for (auto& c : chunks) cs.push_back(Json::str(tohex(c)));
+    g_dump.push_back(Json::obj({{"name", Json::str(what)}, {"filetype", Json::str(type)}, {"basename", Json::str(name)},
+                                {"payload", Json::str(tohex(payload))}, {"chunks", Json::arr(cs)},
+                                {"indirection", Json::str(tohex(ibox))}, {"read_cap", Json::str(tohex(unframe(ibox).data))}}));
+}
+
 static void file_tests(const char* out_path) {
     Vec v{"client", "files", {}};
     {
@@ -545,26 +564,76 @@ static void file_tests(const char* out_path) {
         for (auto& l : w.later)
             if (l.in && l.in->kind == Input::WAKE && l.who == 1) bob = std::max(bob, l.due - w.clock);
         check(bob == RADIO_POLL_MS && backoff(0) > RADIO_POLL_MS, v, "radio polls every second");
-        // What the C++ engine wrote, for pigeonhole_protocols to read (filevec read).
-        if (out_path) {
-            Bytes ibox;
-            for (auto& [k, b] : w.sim.boxes)
-                if (!b.second.empty() && b.second[0] == 'I') ibox = b.second;
-            auto chunks = substream_of(w, ibox);
-            check(chunks.size() == 14, v, "the substream as written");
-            std::vector<Json> cs;
-            for (auto& c : chunks) cs.push_back(Json::str(tohex(c)));
-            auto ch = unframe(ibox);
-            Json vec = Json::obj({{"name", Json::str("C++ engine: cat.png in 14 chunks")},
-                                  {"filetype", Json::str("image/png")}, {"basename", Json::str("cat.png")},
-                                  {"payload", Json::str(tohex(pic))}, {"chunks", Json::arr(cs)},
-                                  {"indirection", Json::str(tohex(ibox))}, {"read_cap", Json::str(tohex(ch.data))}});
-            FILE* f = fopen(out_path, "w");
-            if (f) {
-                fprintf(f, "%s\n", Json::obj({{"vectors", Json::arr({vec})}}).dump().c_str());
-                fclose(f);
-            }
+        if (out_path) dump_upload(w, "C++ engine: cat.png in 14 chunks", "image/png", "cat.png", pic, 14);
+    }
+    {
+        // A burst of ours, recorded from lxst's batches and sent as hushphone sends a clip.
+        World w;
+        found_and_join(w);
+        std::ifstream in("vectors/hushphone/tone.opus", std::ios::binary);
+        Bytes tone((std::istreambuf_iterator<char>(in)), {});
+        auto o = kq::ogg::demux(tone.data(), tone.size());
+        kq::radio::Recorder rec;
+        for (auto& p : o->packets) {
+            Bytes m{kq::radio::kEvBatch, 1, (uint8_t)(p.size() + 1), 0, kq::radio::kCodecOpus};
+            m.insert(m.end(), p.begin(), p.end());
+            rec.batch(m.data(), m.size());
         }
+        auto [clip, name] = rec.finish(3);
+        send_file(w, 0, name, clip);
+        w.run_to(w.clock + 600000);
+        auto a = attachment(w, 1, name);
+        check(a && a->filetype == "audio/opus" && file(w, 1, name) == clip, v, "a recorded burst arrives as a voice clip");
+        if (out_path) dump_upload(w, "C++ engine: a recorded burst", "audio/opus", name, clip, 2);
+    }
+    {
+        // Our own burst in a radio group is held in memory only: no file, no line, no spool, and
+        // not in a saved job even when it would fit one box; a restart loses it.
+        World w;
+        found_and_join(w);
+        for (auto& m : w.members) m.eng.radio.insert("g");
+        std::ifstream in("vectors/hushphone/tone.opus", std::ios::binary);
+        Bytes tone((std::istreambuf_iterator<char>(in)), {});
+        auto o = kq::ogg::demux(tone.data(), tone.size());
+        auto record = [&](size_t n) {
+            kq::radio::Recorder rec;
+            for (size_t i = 0; i < n; i++) {
+                Bytes m{kq::radio::kEvBatch, 1, (uint8_t)(o->packets[i].size() + 1), 0, kq::radio::kCodecOpus};
+                m.insert(m.end(), o->packets[i].begin(), o->packets[i].end());
+                rec.batch(m.data(), m.size());
+            }
+            return rec.finish(9);
+        };
+        auto [clip, name] = record(5);
+        check(clip.size() + 200 < 1530, v, "a short burst, that would fit one box");
+        send_file(w, 0, name, clip);
+        auto unsaved = [&](size_t i, const Bytes& b) {
+            std::string raw(b.end() - 40, b.end()), hex = tohex(Bytes(b.end() - 40, b.end()));
+            bool found = false;
+            for (auto& [_, d] : *w.members[i].files) found |= d.find(raw) != std::string::npos || d.find(hex) != std::string::npos;
+            for (auto& [_, d] : *w.members[i].kept) found |= std::string(d.begin(), d.end()).find(raw) != std::string::npos;
+            for (auto& l : w.chat(i, "g")->log) found |= l.text.find(".opus") != std::string::npos;
+            return !found;
+        };
+        check(unsaved(0, clip), v, "ours is not saved while it is written");
+        w.run_to(w.clock + 600000);
+        auto& bob = w.members[1];
+        bool ibox = false;
+        for (auto& [k, b] : w.sim.boxes) ibox |= !b.second.empty() && b.second[0] == 'I';
+        check(bob.clips.size() == 1 && bob.clips[0].bytes == clip && ibox && unsaved(0, clip) && unsaved(1, clip), v,
+              "it is heard, through a substream, and kept by neither");
+        auto [clip2, name2] = record(50);
+        send_file(w, 0, name2, clip2);
+        for (int k = 0; k < 3; k++) w.act();
+        auto& alice = w.members[0];
+        w.queue.erase(std::remove_if(w.queue.begin(), w.queue.end(), [](auto& q) { return q.first == 0; }), w.queue.end());
+        w.later.erase(std::remove_if(w.later.begin(), w.later.end(), [](auto& l) { return l.who == 0; }), w.later.end());
+        alice.eng = Engine(kq::Store(kq::memory_files(*alice.files)).load(alice.name), 1530);
+        alice.eng.radio.insert("g");
+        w.release(0, alice.eng.resume(0));
+        w.run_to(w.clock + 600000);
+        check(noticed(w, 0, "a message could not be sent: what it held was lost") && w.chat(0, "g")->jobs.empty() &&
+                  unsaved(0, clip2), v, "a restart while it is written loses it, and says so");
     }
     {
         World w;
@@ -682,6 +751,13 @@ int main() {
         }
     }
     file_tests(getenv("KQ_FILES_OUT"));
+    if (const char* out = getenv("KQ_FILES_OUT")) {
+        FILE* f = fopen(out, "w");
+        if (f) {
+            fprintf(f, "%s\n", Json::obj({{"vectors", Json::arr(g_dump)}}).dump().c_str());
+            fclose(f);
+        }
+    }
     check(g_unsaved == 0 && g_saved > 0, v, "every step's state is saved");
     printf("client: %d steps saved and loaded back\n", g_saved);
     return finish("client");

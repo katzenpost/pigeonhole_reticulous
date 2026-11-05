@@ -23,6 +23,7 @@
 #include "kq_store.h"
 #include "kq_vault.h"
 #include "kq_ogg.h"
+#include "kq_radio_feed.h"
 #include "kq_view.h"
 #include "sim.h"
 
@@ -240,9 +241,31 @@ void kqRadioSet(const std::string& group, bool on) {
     g_rt->eng.radio = std::set<std::string>(g_radio.begin(), g_radio.end());
 }
 
+std::string g_talk;
+kq::radio::TalkClock g_clock;
+std::string kqRadioTalk() {
+    std::lock_guard<std::mutex> g(g_mu);
+    return g_talk;
+}
+void kqRadioSetTalk(const std::string& group) {
+    if (!group.empty()) kqRadioSet(group, true);
+    std::lock_guard<std::mutex> g(g_mu);
+    g_talk = group;
+}
+
 KqRadio kqRadio() {
     std::lock_guard<std::mutex> g(g_mu);
-    return g_radioState;
+    KqRadio r = g_radioState;
+    r.talking = g_clock.on;
+    r.talk_left_ms = g_clock.left_ms((uint32_t)nowMs());
+    r.talk_max_ms = kq::radio::kTalkMaxMs;
+    return r;
+}
+
+void simTalk(bool down) {
+    std::lock_guard<std::mutex> g(g_mu);
+    if (down) g_clock.start((uint32_t)nowMs());
+    else g_clock.stop();
 }
 
 void kqCommand(const char* verb, const std::string& group, const std::string& arg) {

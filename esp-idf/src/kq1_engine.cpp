@@ -258,8 +258,10 @@ struct Engine::Cx {
     // Queue outgoing, each written after the one before; line shows the one carrying content,
     // into which the bytes of a file it carries, payload, are put. A message too long for a box
     // goes to a substream, written before the I box naming it.
+    // memory_only: a radio burst of ours, whose bytes are never saved: it goes to a substream
+    // even when it would fit a box, and its message is not spooled, so a restart loses it.
     void enqueue(Chat& c, const std::vector<Outgoing>& outgoing, const std::optional<Bytes>& content,
-                 std::optional<size_t> line, const Bytes* payload = nullptr) {
+                 std::optional<size_t> line, const Bytes* payload = nullptr, bool memory_only = false) {
         for (auto& o : outgoing) {
             if (!c.group) continue;
             bool mine = content && o.message.content == content;
@@ -272,7 +274,7 @@ struct Engine::Cx {
                 Job j;
                 j.token = o.token;
                 if (mine) j.line = line;
-                if (b->size() <= max) {
+                if (b->size() <= max && !(memory_only && mine)) {
                     j.id = c.fresh();
                     j.box = std::move(*b);
                     c.jobs.push_back(std::move(j));
@@ -286,7 +288,7 @@ struct Engine::Cx {
                     u.file = "spool/" + slug(c.name) + "-" + std::to_string(now) + "-" + std::to_string(j.id) + ".cbor";
                     u.box_size = max;
                     u.total = chunk_count(blob.size(), max);
-                    keep(u.file, blob);
+                    if (!(memory_only && mine)) keep(u.file, blob);
                     flight.blobs[{c.id, j.id}] = std::move(blob);
                     j.upload = std::move(u);
                     c.jobs.push_back(std::move(j));
@@ -994,16 +996,21 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             std::string safe = safe_name(input.name);
             FileUpload f{{}, filetype_of(safe), safe};
             Bytes content = file_content(c.group->membership(nullptr), f, wire_version);
-            Attachment a{safe, f.filetype, bytes.size(), attachment_file(c, c.next_id, now, safe)};
-            cx.keep(a.file, bytes);
-            Line l;
-            l.sender = c.group->me();
-            l.text = file_text(a);
-            l.status = Status::Pending;
-            l.attachment = std::move(a);
-            size_t line = cx.say(c, l);
+            // A voice burst of ours in a radio group is not kept either: no file, no line.
+            bool burst = radio.count(id) && f.filetype == "audio/opus";
+            std::optional<size_t> line;
+            if (!burst) {
+                Attachment a{safe, f.filetype, bytes.size(), attachment_file(c, c.next_id, now, safe)};
+                cx.keep(a.file, bytes);
+                Line l;
+                l.sender = c.group->me();
+                l.text = file_text(a);
+                l.status = Status::Pending;
+                l.attachment = std::move(a);
+                line = cx.say(c, l);
+            }
             auto outg = c.group->compose(content);
-            cx.enqueue(c, outg, content, line, &bytes);
+            cx.enqueue(c, outg, content, line, &bytes, burst);
             return;
         }
         case Input::LOADED: {

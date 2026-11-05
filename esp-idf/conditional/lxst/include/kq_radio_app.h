@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// The Radio app: which groups are listened to as radio, and what is playing. Listen-only for now.
+// The Radio app: which groups are listened to as radio and which one is talked to, and what is
+// playing.
 // A voice build without a screen gets a service that does nothing in its place.
 #pragma once
 

@@ -2,7 +2,7 @@
 // The T-Deck's screen on the desktop: KqApp (or KqRadioApp, --app radio) on a 320x240 LVGL display drawn in memory, below a
 // status bar, with the board's keypad and pointer fed from commands on standard input:
 //   type <text> | key enter|esc|tab|backtab|up|down|left|right|bs | click <x> <y> | back
-//   shot <file.png> | sleep <s> | until <text> <s> | dump | quit
+//   shot <file.png> | sleep <s> | until <text> <s> | dump | talk | release | quit
 // The chats are saved in --state, which must exist, and loaded from it at start.
 // `until` waits until the chats (as `dump` prints them) contain the text.
 #include <chrono>
@@ -259,6 +259,8 @@ int main(int argc, char** argv) {
             size_t k = arg.rfind(' ');
             untilText = arg.substr(0, k);
             busyUntil = clock() + std::chrono::seconds(atoi(arg.substr(k + 1).c_str()));
+        } else if (cmd == "talk" || cmd == "release") {
+            simTalk(cmd == "talk");
         } else if (cmd == "dump") {
             printf("channel %s; saved %s\n%s", simChannelUp() ? "up" : "down", simSaved().c_str(), dump().c_str());
         } else if (cmd == "quit") {

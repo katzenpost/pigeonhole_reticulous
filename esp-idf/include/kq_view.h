@@ -31,12 +31,20 @@ void kqCommand(const char* verb, const std::string& group, const std::string& ar
 // they arrive, held in memory only; they are polled every second.
 struct KqRadio {
     std::string playing;     // ~name while a burst plays
+    bool talking = false;    // the talk key is held: a burst of ours is being recorded
+    uint32_t talk_left_ms = 0, talk_max_ms = 0;  // while talking: what is left of the most a burst lasts
+    bool cut = false;        // the burst reached the most it lasts and was sent; the key is still held
     unsigned queued = 0, heard = 0, missed = 0;
     std::string last;        // the last burst: who, how long, how soon after it was fetched it was heard
 };
 KqRadio kqRadio();
 std::vector<std::string> kqRadioGroups();
 void kqRadioSet(const std::string& group, bool on);
+// The radio group our bursts go to while the talk key is held, or none; one of kqRadioGroups().
+std::string kqRadioTalk();
+void kqRadioSetTalk(const std::string& group);
+// A file sent to a group, as kq sendfile sends one.
+void kqSendFile(const std::string& group, const std::string& name, const std::vector<uint8_t>& bytes);
 
 // Whether the chats can be read yet: at first start the user chooses whether a passphrase
 // protects them; with one, they stay locked after every start until it is given.

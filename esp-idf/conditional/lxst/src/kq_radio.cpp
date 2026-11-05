@@ -8,6 +8,7 @@
 #include <deque>
 
 #include "esp_heap_caps.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -20,7 +21,8 @@
 #include "kq_view.h"
 
 static_assert(kq::radio::kOpFrames == LXST_OP_FRAMES && kq::radio::kOpTalkEnd == LXST_OP_TALK_END &&
-                  kq::radio::kCodecOpus == LXST_CODEC_OPUS && kq::radio::kMaxBatch == LXST_MAX_BATCH,
+                  kq::radio::kCodecOpus == LXST_CODEC_OPUS && kq::radio::kMaxBatch == LXST_MAX_BATCH &&
+                  kq::radio::kEvBatch == LXST_EV_BATCH,
               "kq_radio_feed.h follows lxst.h");
 
 namespace {
@@ -57,6 +59,17 @@ Burst s_cur;                 // what is playing; its data is freed once the feed
 uint32_t s_started = 0, s_lastEnd = 0;
 bool s_heardOne = false;
 
+// Talking: lxst's batches while the talk key is held, sent to the talk group at its release.
+constexpr size_t kRxBytes = 4096;  // a batch: 64 frames of at most 21 bytes at 8 kbit/s, 20 ms
+uint8_t* s_rx = nullptr;           // in PSRAM
+kq::radio::Recorder s_rec;
+kq::radio::TalkClock s_clock;
+bool s_cut = false;                // sent at the cap: the rest, until the key is let go, is dropped
+std::string s_talk;                // the talk group, as last read
+uint32_t s_talkRead = 0, s_openTried = 0, s_keyedAt = 0;
+std::string s_upChat;              // a burst of ours being written, since s_upAt
+uint32_t s_upAt = 0;
+
 uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 void release(Burst& b) {
@@ -64,10 +77,54 @@ void release(Burst& b) {
     b.data = nullptr;
 }
 
+void sendBurst(uint32_t now) {
+    if (s_rec.empty() || s_talk.empty()) { s_rec.finish(0); return; }
+    uint32_t ms = s_rec.ms();
+    size_t frames = s_rec.frames();
+    auto [clip, name] = s_rec.finish(esp_random());
+    kqSendFile(s_talk, name, clip);
+    s_upChat = s_talk;
+    s_upAt = now;
+    info("kq radio: sent %.1f s to %s: %u frames, %u bytes, encoder %d us a frame on average, %d at most",
+         ms / 1000.0, s_talk.c_str(), (unsigned)frames, (unsigned)clip.size(), storageGetInt("lxst.stats.enc_us_avg", -1),
+         storageGetInt("lxst.stats.enc_us_max", -1));
+}
+
+// At the cap the burst goes out as if the talk key had been let go; lxst says nothing of the key
+// itself, so until it is let go (LXST_EV_TALK_END) what it sends is dropped.
+void cut(uint32_t now) {
+    sendBurst(now);
+    s_cut = true;
+    info("kq radio: the talk key was held for %u s, the most a burst lasts: sent", (unsigned)(kq::radio::kTalkMaxMs / 1000));
+    Lock g;
+    s_st.cut = true;
+    s_st.last = "talk time is up after 2 minutes: sent; let go of the talk key";
+}
+
 void onLxRecv(int handle, size_t) {
-    uint8_t m[16];
-    for (size_t n; (n = itsRecv(handle, m, sizeof m, 0)) > 0;) {
-        if (handle != s_lx || m[0] != LXST_EV_SPEAKING || n < 6) continue;
+    uint8_t* m = s_rx;
+    for (size_t n; (n = itsRecv(handle, m, kRxBytes, 0)) > 0;) {
+        if (handle != s_lx) continue;
+        if (m[0] == LXST_EV_BATCH) {
+            if (!s_st.talking) {
+                Lock g;
+                s_st.talking = true;
+                s_keyedAt = nowMs();
+                s_clock.start(s_keyedAt);
+            }
+            if (!s_cut && !s_rec.batch(m, n) && s_rec.full()) cut(nowMs());
+            continue;
+        }
+        if (m[0] == LXST_EV_TALK_END) {
+            if (!s_cut) sendBurst(nowMs());
+            s_cut = false;
+            s_clock.stop();
+            Lock g;
+            s_st.talking = false;
+            s_st.cut = false;
+            continue;
+        }
+        if (m[0] != LXST_EV_SPEAKING || n < 6) continue;
         uint32_t sp = m[1] | m[2] << 8 | m[3] << 16 | (uint32_t)m[4] << 24;
         if (sp != s_cur.speaker) continue;
         Lock g;
@@ -87,6 +144,12 @@ void onLxRecv(int handle, size_t) {
 
 void onLxDisc(int) { s_lx = -1; }
 
+// Muted while there is no talk group, so nothing is sent for one.
+void sendState() {
+    uint8_t st[4] = {LXST_OP_STATE, (uint8_t)!s_talk.empty(), (uint8_t)s_talk.empty(), 0};
+    if (s_lx >= 0) itsSend(s_lx, st, sizeof st, 0);
+}
+
 bool open() {
     if (s_lx >= 0) return true;
     lxst_profile_t p = {};
@@ -100,13 +163,12 @@ bool open() {
     p.jitter_ms = kJitterMs;
     p.max_jitter_ms = 30000;
     p.sequenced = 1;
-    p.can_speak = 0;  // listen only
+    p.can_speak = !s_talk.empty();
     p.tx_mode = LXST_TX_PTT;
     p.rx_any = 1;     // hushphone's 48 kHz 20 ms Opus, a T-Deck's 60 ms: whatever a burst carries
     s_lx = itsConnect(LXST_TASK, LXST_PORT_SESSION, &p, sizeof p, pdMS_TO_TICKS(1000), 0, onLxRecv, onLxDisc);
     if (s_lx < 0) return false;
-    uint8_t st[4] = {LXST_OP_STATE, 0, 1, 0};
-    itsSend(s_lx, st, sizeof st, 0);
+    sendState();
     return true;
 }
 
@@ -126,9 +188,33 @@ bool next(Burst& b) {
 
 void radioMain(void*) {
     itsClientInit(2);
+    s_rx = (uint8_t*)heap_caps_malloc(kRxBytes, MALLOC_CAP_SPIRAM);
     for (;;) {
         itsPoll(pdMS_TO_TICKS(40));
         uint32_t now = nowMs();
+        if (s_st.talking && !s_cut && s_clock.expired(now)) cut(now);
+        // A talk group holds the session, so the talk key works; it is read twice a second.
+        if (now - s_talkRead > 500) {
+            s_talkRead = now;
+            std::string t = kqRadioTalk();
+            if (t != s_talk) { s_talk = t; sendState(); }
+            if (!s_talk.empty() && s_lx < 0 && now - s_openTried > 3000) {  // in use: tried again later
+                s_openTried = now;
+                open();
+            }
+            if (!s_upChat.empty()) {
+                auto c = kqChats(s_upChat);
+                if (c.empty() || c[0].pending == 0) {
+                    char line[120];
+                    snprintf(line, sizeof line, "sent to %s: written %u ms after the talk key was let go",
+                             s_upChat.c_str(), (unsigned)(now - s_upAt));
+                    info("kq radio: %s", line);
+                    Lock g;
+                    s_st.last = line;
+                    s_upChat.clear();
+                }
+            }
+        }
         if (!s_feed.active() && s_st.playing.empty()) {
             if (s_cur.data == nullptr && next(s_cur)) {
                 if (!open()) {
@@ -150,7 +236,7 @@ void radioMain(void*) {
                 s_heardOne = false;
                 s_st.playing = s_cur.who;
                 s_st.heard++;
-            } else if (s_lx >= 0 && now - s_lastEnd > kHoldMs) {
+            } else if (s_lx >= 0 && now - s_lastEnd > kHoldMs && s_talk.empty() && s_rec.empty()) {
                 itsDisconnect(s_lx);
                 s_lx = -1;
             }
@@ -202,7 +288,10 @@ void kqRadioHear(kq1::Clip&& c) {
 
 KqRadio kqRadio() {
     Lock g;
-    return s_st;
+    KqRadio r = s_st;
+    r.talk_left_ms = s_clock.left_ms(nowMs());
+    r.talk_max_ms = kq::radio::kTalkMaxMs;
+    return r;
 }
 
 void KqRadioService::onInit() {
