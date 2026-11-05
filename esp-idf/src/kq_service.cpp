@@ -473,6 +473,7 @@ static void benchMain(void* arg) {
         killSelf();
     }
     bool ctidh = kind == BENCH_CTIDH;
+    info("bench: CTIDH field %s", KQ_CTIDH_FIELD_NAME);
     static uint64_t y[16];
     randombytes_buf(y, sizeof y);
     y[15] &= (1ull << 59) - 1;

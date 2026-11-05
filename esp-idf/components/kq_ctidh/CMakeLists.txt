@@ -42,7 +42,7 @@ idf_component_register(
     INCLUDE_DIRS highctidh
     LDFRAGMENTS ${CTIDH_LF}
     PRIV_REQUIRES kq_sodium)
-target_compile_definitions(${COMPONENT_LIB} PUBLIC BITS=1024 CGONUTS HIGHCTIDH_PORTABLE=1)
+target_compile_definitions(${COMPONENT_LIB} PUBLIC BITS=1024 CGONUTS HIGHCTIDH_PORTABLE=1 KQ_CTIDH_FIELD_NAME="${field}")
 # Vendored code: its warnings are upstream's, and GCC's maybe-uninitialized misfires in poly.c.
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2 -fwrapv -Wno-error -Wno-maybe-uninitialized -Wno-unused-function -Wno-unused-variable)
 if(NOT field STREQUAL "fiat")
