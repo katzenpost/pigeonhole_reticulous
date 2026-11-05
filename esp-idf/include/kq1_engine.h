@@ -52,6 +52,9 @@ struct Input {
         CREATE, JOIN, INDUCT, SEND, SCAN, LEAVE, REMOVE_MEMBER, CLEAR, RENAME, CREATED, WROTE, REFUSED, READ, WAKE,
         SCAN_READ, WALKED, DERIVED, MINTED, OPENED, JOINER_PAYLOAD, SEALED_REPLY, PUBLISHED, EPOCH, FAILED,
         SEND_FILE, LOADED, SUBSTREAM, WROTE_CHUNK, CHUNK_INDEXES, READ_CHUNK,
+        // A file sent as it is made, a radio burst while the talk key is held: started with its
+        // name, its bytes added as they come, ended. Its chunks are written as they fill.
+        STREAM_START, STREAM_DATA, STREAM_END,
     } kind;
     explicit Input(Kind k) : kind(k) {}
     ChatId chat;
@@ -65,7 +68,7 @@ struct Input {
     Outcome outcome;                         // READ, SCAN_READ, READ_CHUNK
     WalkResult walked;                       // WALKED
     std::vector<Index> indexes;              // DERIVED, CHUNK_INDEXES
-    std::optional<Bytes> bytes;              // SEND_FILE; LOADED, nothing when the file is gone
+    std::optional<Bytes> bytes;              // SEND_FILE, STREAM_DATA; LOADED, nothing when the file is gone
     Minted minted;                           // MINTED
     Index box1;                              // MINTED, JOINER_PAYLOAD
     Opened opened;                           // OPENED
@@ -123,8 +126,8 @@ struct StepResult {
 
 // A message written to a substream: its boxes from sent on are still to write, at next on.
 struct Upload {
-    std::string file;  // the message, kept until its boxes are written
-    size_t box_size = 0, total = 0;
+    std::string file;  // the message, kept until its boxes are written; none for a stream
+    size_t box_size = 0, total = 0;  // total 0: a stream not yet ended
     Bytes write_cap;   // the substream's; empty until made
     size_t sent = 0;
     Index next;
@@ -250,6 +253,11 @@ private:
         std::map<JobKey, Bytes> blobs;                           // each upload's message
         std::map<StreamKey, std::pair<Index, std::vector<Bytes>>> fetched;  // each download's next index and boxes
         std::map<std::pair<Key, Index>, Bytes> arriving;         // a file's bytes, while its message is read
+        // Each stream being sent: its message so far (the payload's length header left at 0),
+        // and what follows the payload, from the message composed at its start.
+        struct Stream { Bytes data, tail; size_t header = 0; };
+        std::map<JobKey, Stream> streams;
+        std::map<std::pair<ChatId, std::string>, size_t> stream_jobs;  // by its name
         void forget(const ChatId& chat);
     } flight_;
     struct Cx;

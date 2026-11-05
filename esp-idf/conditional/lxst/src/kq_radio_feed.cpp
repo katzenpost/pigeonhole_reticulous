@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "kq_radio_feed.h"
 
-#include <sodium.h>
-
 namespace kq::radio {
 
 static void le(Bytes& b, uint32_t v, int n) {
@@ -60,7 +58,6 @@ std::vector<Bytes> Feed::due(uint32_t now_ms) {
 
 bool Recorder::batch(const uint8_t* m, size_t n) {
     if (n < 2 || m[0] != kEvBatch || full_) return false;
-    if (o_.packets.empty()) o_.packets.reserve(kMaxMs / 20);
     size_t at = 2;
     for (size_t i = 0; i < m[1] && at + 2 <= n; i++) {
         size_t len = m[at] | m[at + 1] << 8;
@@ -71,23 +68,25 @@ bool Recorder::batch(const uint8_t* m, size_t n) {
         uint32_t d = ogg::packet_us(p);
         if (!d) return false;
         if (us_ + d > (uint64_t)kMaxMs * 1000) { full_ = true; return false; }
+        if (!frames_) out_ = mux_.start();
+        Bytes pg = mux_.add(p);
+        out_.insert(out_.end(), pg.begin(), pg.end());
         us_ += d;
-        o_.packets.push_back(std::move(p));
+        frames_++;
     }
     return true;
 }
 
-std::pair<Bytes, std::string> Recorder::finish(uint32_t serial) {
-    Bytes clip = ogg::mux(o_, serial);
-    uint8_t h[crypto_hash_sha256_BYTES];
-    crypto_hash_sha256(h, clip.data(), clip.size());
+void Recorder::end() {
+    Bytes pg = mux_.finish();
+    out_.insert(out_.end(), pg.begin(), pg.end());
+}
+
+std::string burst_name(const uint8_t random[32]) {
     static const char* x = "0123456789abcdef";
     std::string name;
-    for (uint8_t b : h) { name += x[b >> 4]; name += x[b & 15]; }
-    o_.packets = {};
-    us_ = 0;
-    full_ = false;
-    return {std::move(clip), name + ".opus"};
+    for (int i = 0; i < 32; i++) { name += x[random[i] >> 4]; name += x[random[i] & 15]; }
+    return name + ".opus";
 }
 
 }  // namespace kq::radio

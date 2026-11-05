@@ -306,6 +306,69 @@ static std::optional<kq1::Input> sendFile(const std::string& group, const std::s
     return in;
 }
 
+#if CONFIG_STRADDLE_LXST || CONFIG_IDF_TARGET_LINUX
+#define KQ_STREAM_CLI 1
+// kq stream <g> <path> [bytes/s]: a file fed to the engine as a burst is, a second's worth at a
+// time, to time progressive upload against kq sendfile where there is no microphone (the Linux
+// image). Then how long after its end its I box was written, and after its start.
+static struct {
+    std::string group, name, status = "-";
+    kq::Bytes data;
+    size_t at = 0, rate = 1000;
+    uint32_t started = 0, next = 0, ended = 0;
+} s_feed;
+
+static void feedStart(const std::string& group, const std::string& arg) {
+    size_t sp = arg.find(' ');
+    std::string path = arg.substr(0, sp);
+    auto in = sendFile(group, path);
+    if (!in || !in->bytes) return;
+    s_feed = {};
+    s_feed.group = group;
+    s_feed.name = in->name;
+    s_feed.data = std::move(*in->bytes);
+    if (sp != std::string::npos) s_feed.rate = std::max(1, atoi(arg.c_str() + sp + 1));
+    s_feed.started = s_feed.next = nowMs();
+    kq1::Input st(kq1::Input::STREAM_START);
+    st.chat = group;
+    st.name = s_feed.name;
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    s_rt->input(nowS(), nowMs(), st);
+    xSemaphoreGive(s_mu);
+    s_feed.status = "streaming " + s_feed.name;
+}
+
+// On the kq task, each tick.
+static void feedTick() {
+    if (s_feed.group.empty()) return;
+    uint32_t now = nowMs();
+    if (s_feed.ended) {
+        auto c = kqChats(s_feed.group);
+        if (c.empty() || c[0].pending == 0) {
+            s_feed.status = s_feed.name + ", " + std::to_string(s_feed.data.size()) + " bytes over " +
+                            std::to_string((s_feed.ended - s_feed.started) / 1000) + " s: written " +
+                            std::to_string(now - s_feed.ended) + " ms after its end";
+            info("kq stream: %s", s_feed.status.c_str());
+            s_feed.group.clear();
+        }
+        return;
+    }
+    if ((int32_t)(now - s_feed.next) < 0) return;
+    s_feed.next += 1000;
+    size_t n = std::min(s_feed.rate, s_feed.data.size() - s_feed.at);
+    bool end = s_feed.at + n == s_feed.data.size();
+    kq1::Input d(end ? kq1::Input::STREAM_END : kq1::Input::STREAM_DATA);
+    d.chat = s_feed.group;
+    d.name = s_feed.name;
+    d.bytes = kq::Bytes(s_feed.data.begin() + s_feed.at, s_feed.data.begin() + s_feed.at + n);
+    s_feed.at += n;
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    s_rt->input(nowS(), nowMs(), d);
+    xSemaphoreGive(s_mu);
+    if (end) s_feed.ended = now;
+}
+#endif
+
 // Commands reach the kq task as storage keys "kq.cmd.<verb>" = "<group>|<argument>",
 // since the Channel's ITS handle belongs to this task.
 static void onCmd(const char* key, const char* val) {
@@ -318,6 +381,9 @@ static void onCmd(const char* key, const char* val) {
     std::string group = v.substr(0, bar), arg = bar == std::string::npos ? "" : v.substr(bar + 1);
     auto in = kq::input_of(verb, group, arg);
     if (verb == "file") in = sendFile(group, arg);
+#if KQ_STREAM_CLI
+    if (verb == "strm") { feedStart(group, arg); return; }
+#endif
     if (!in) return;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_rt->input(nowS(), nowMs(), *in);
@@ -455,13 +521,15 @@ void kqRadioSetTalk(const std::string& group) {
     storageSet("s.kq.radio.talk", group.c_str());
 }
 
-// From any task: the engine takes the file under its lock, and the kq task hands out what follows.
-void kqSendFile(const std::string& group, const std::string& name, const std::vector<uint8_t>& bytes) {
+// From any task: the engine takes the stream's step under its lock, and the kq task hands out
+// the chunks that follow.
+void kqStream(const std::string& group, const std::string& name, KqStream step, const std::vector<uint8_t>& bytes) {
     if (!s_store) return;
-    kq1::Input in(kq1::Input::SEND_FILE);
+    kq1::Input in(step == KqStream::START ? kq1::Input::STREAM_START
+                  : step == KqStream::DATA ? kq1::Input::STREAM_DATA : kq1::Input::STREAM_END);
     in.chat = group;
     in.name = name;
-    in.bytes = bytes;
+    if (!bytes.empty()) in.bytes = bytes;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_rt->input(nowS(), nowMs(), in);
     xSemaphoreGive(s_mu);
@@ -696,6 +764,11 @@ static void cliBench(const std::string& what) {
 #else
 #define KQ_RADIO_USAGE ""
 #endif
+#if KQ_STREAM_CLI
+#define KQ_STREAM_USAGE " | stream <g> <path> [bytes/s]"
+#else
+#define KQ_STREAM_USAGE ""
+#endif
 
 static void cliKq(const char* args) {
     std::string a = args ? args : "";
@@ -729,6 +802,13 @@ static void cliKq(const char* args) {
         kqCommand(verb.c_str(), group);
         return;
     }
+#if KQ_STREAM_CLI
+    if (verb == "stream" && !group.empty() && !arg.empty()) {
+        kqCommand("strm", group, arg);
+        cliPrintf("kq stream: queued; `kq` shows how it went\n");
+        return;
+    }
+#endif
     if ((verb == "invite" || verb == "send" || verb == "sendfile") && !group.empty() && !arg.empty()) {
         if (verb == "sendfile") {
             int h = fs_open(arg.c_str(), "rb");
@@ -747,7 +827,7 @@ static void cliKq(const char* args) {
     if (verb == "log" && !group.empty()) { printChats(group, true); return; }
     if (!a.empty() && verb != "status") {
         cliPrintf("kq [status] | probe [rounds] | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n"
-                  "   | sendfile <g> <path>" KQ_RADIO_USAGE "\n"
+                  "   | sendfile <g> <path>" KQ_STREAM_USAGE KQ_RADIO_USAGE "\n"
                   "   | bench field | ctidh | bacap | join | radio [rounds] | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
         return;
     }
@@ -771,6 +851,9 @@ static void cliKq(const char* args) {
     cliPrintf("requests pending: %u, box size %u, wire version %u\n", (unsigned)s_client->pending(),
               (unsigned)s_client->box_size(), (unsigned)s_rt->eng.wire_version);
     cliPrintf("frames sent %u, refused %u, received %u\n", s_sent, s_sendFail, s_recv);
+#if KQ_STREAM_CLI
+    cliPrintf("stream: %s\n", s_feed.status.c_str());
+#endif
     cliPrintf("probe: %s\n", s_probe->write.ms.empty() && !s_probe->write.failed && !s_probe->running()
                                 ? "-" : s_probe->status().c_str());
     if (s_store) cliPrintf("saved: %u writes, %u bytes\n", (unsigned)s_store->writes, (unsigned)s_store->bytes);
@@ -807,6 +890,9 @@ static void kqTaskMain(void*) {
                 info("kq: Argon2id over %u KiB, %u passes: %u ms", (unsigned)(s_vault->last_mem >> 10),
                      (unsigned)s_vault->last_ops, (unsigned)s_vault->last_ms);
             if (s_store) pumpClient();
+#if KQ_STREAM_CLI
+            if (s_store) feedTick();
+#endif
         }
         if (s_chan >= 0) chanClosed();
         if (s_annHandle >= 0) { itsDisconnect(s_annHandle); s_annHandle = -1; }

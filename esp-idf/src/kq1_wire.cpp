@@ -899,6 +899,12 @@ struct At {
 };
 }  // namespace
 
+std::optional<std::pair<size_t, size_t>> payload_span(const Bytes& cbor) {
+    size_t start, stop;
+    if (!At{cbor}.payload(start, stop)) return std::nullopt;
+    return std::make_pair(start, stop);
+}
+
 std::optional<std::pair<Bytes, Bytes>> take_payload(const Bytes& cbor) {
     At a{cbor};
     size_t start, stop, data;
