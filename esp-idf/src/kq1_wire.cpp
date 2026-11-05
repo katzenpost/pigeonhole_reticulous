@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "kq1_wire.h"
 
+#include <cctype>
 #include <climits>
 #include <cstring>
 
@@ -753,6 +754,194 @@ Chunk unframe(const Bytes& b) {
             break;
     }
     return c;
+}
+
+// ---- files ----
+
+Bytes FileUpload::to_bytes() const {
+    Bytes out;
+    push_header(out, 5, 3);
+    push_text(out, "payload");
+    push_bytes(out, payload);
+    push_text(out, "filetype");
+    push_text(out, filetype);
+    push_text(out, "basename");
+    push_text(out, basename);
+    return out;
+}
+
+std::optional<FileUpload> FileUpload::from_bytes(const Bytes& raw) {
+    Span l = span(raw);
+    uint8_t major;
+    uint64_t n;
+    if (!read_header(l, major, n) || major != 5) return std::nullopt;
+    std::optional<Bytes> p;
+    std::optional<std::string> t, b;
+    for (uint64_t i = 0; i < n; i++) {
+        std::string k;
+        if (!read_text(l, k)) return std::nullopt;
+        if (k == "payload") {
+            Bytes v;
+            if (!read_bytes(l, v)) return std::nullopt;
+            p = std::move(v);
+        } else if (k == "filetype" || k == "basename") {
+            std::string v;
+            if (!read_text(l, v)) return std::nullopt;
+            (k == "filetype" ? t : b) = v;
+        } else if (!skip_items(l.n + 1, 1, l)) {
+            return std::nullopt;
+        }
+    }
+    if (!p || !t || !b) return std::nullopt;
+    return FileUpload{std::move(*p), *t, *b};
+}
+
+std::optional<FileUpload> file_of(const Gcm& g) {
+    if (g.msg_type != MSG_FILE_UPLOAD) return std::nullopt;
+    for (auto& o : g.other) if (o.key == "file_upload") return FileUpload::from_bytes(o.raw);
+    return std::nullopt;
+}
+
+Bytes file_content(const Bytes& membership_hash, const FileUpload& f, uint64_t version) {
+    Gcm g;
+    g.version = version;
+    g.membership_hash = membership_hash;
+    g.msg_type = MSG_FILE_UPLOAD;
+    g.other.push_back({"file_upload", f.to_bytes()});
+    return g.to_bytes();
+}
+
+std::string safe_name(const std::string& name) {
+    std::string s;
+    for (size_t i = 0; i < name.size();) {
+        unsigned char c = name[i];
+        size_t len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : 4;
+        s += len == 1 && (isalnum(c) || strchr(" ._-+()[]", c)) && c ? (char)c : '_';
+        i += len;
+    }
+    size_t dots = s.find_first_not_of('.');
+    s = dots == std::string::npos ? "" : s.substr(dots);
+    if (s.empty()) return "unnamed";
+    return s.substr(0, 200);
+}
+
+const char* filetype_of(const std::string& name) {
+    size_t dot = name.rfind('.');
+    if (dot == std::string::npos) return "arbitrary";
+    std::string ext = name.substr(dot + 1);
+    for (auto& c : ext) c = (char)tolower((unsigned char)c);
+    static const char* const types[][2] = {{"png", "image/png"},   {"jpg", "image/jpeg"}, {"jpeg", "image/jpeg"},
+                                           {"gif", "image/gif"},   {"webp", "image/webp"}, {"bmp", "image/bmp"},
+                                           {"opus", "audio/opus"}};
+    for (auto& t : types) if (ext == t[0]) return t[1];
+    return "arbitrary";
+}
+
+namespace {
+// Positions in one CBOR message, as files.rs reads them.
+struct At {
+    const Bytes& b;
+    Span from(size_t pos) const { return {b.data() + pos, b.size() - pos}; }
+    size_t off(const Span& s) const { return (size_t)(s.p - b.data()); }
+    bool header(size_t pos, uint8_t& major, uint64_t& n, size_t& rest) const {
+        if (pos > b.size()) return false;
+        Span s = from(pos);
+        if (!read_header(s, major, n)) return false;
+        rest = off(s);
+        return true;
+    }
+    bool skip(size_t fuel, size_t pos, size_t& end) const {
+        if (pos > b.size()) return false;
+        Span s = from(pos);
+        if (!skip_items(fuel, 1, s)) return false;
+        end = off(s);
+        return true;
+    }
+    bool lookup(size_t pos, const char* key, size_t& value) const {
+        uint8_t major;
+        uint64_t n;
+        size_t at;
+        if (!header(pos, major, n, at) || major != 5) return false;
+        for (uint64_t i = 0; i < n; i++) {
+            Span s = from(at);
+            std::string name;
+            if (!read_text(s, name)) return false;
+            value = off(s);
+            if (name == key) return true;
+            if (!skip(b.size() + 1, value, at)) return false;
+        }
+        return false;
+    }
+    bool item(size_t pos, uint64_t i, size_t& at) const {
+        uint8_t major;
+        uint64_t n;
+        if (!header(pos, major, n, at) || major != 4 || i >= n) return false;
+        for (uint64_t k = 0; k < i; k++) if (!skip(b.size() + 1, at, at)) return false;
+        return true;
+    }
+    // Where the file's bytes are in a message of either form: the payload item's start and end.
+    bool payload(size_t& start, size_t& stop) const {
+        uint8_t major;
+        uint64_t n;
+        size_t rest;
+        if (!header(0, major, n, rest)) return false;
+        if (major == 4) {
+            size_t t, body;
+            if (!item(0, 2, t) || !header(t, major, n, rest) || major != 0 || n != MSG_FILE_UPLOAD) return false;
+            if (!item(0, 3, body) || !item(body, 0, start)) return false;
+        } else {
+            size_t upload;
+            if (!lookup(0, "file_upload", upload) || !lookup(upload, "payload", start)) return false;
+        }
+        if (!header(start, major, n, rest) || major != 2) return false;
+        return skip(1, start, stop);
+    }
+};
+}  // namespace
+
+std::optional<std::pair<Bytes, Bytes>> take_payload(const Bytes& cbor) {
+    At a{cbor};
+    size_t start, stop, data;
+    uint8_t major;
+    uint64_t n;
+    if (!a.payload(start, stop) || !a.header(start, major, n, data)) return std::nullopt;
+    Bytes without(cbor.begin(), cbor.begin() + start);
+    without.push_back(0x40);
+    without.insert(without.end(), cbor.begin() + stop, cbor.end());
+    return std::make_pair(std::move(without), Bytes(cbor.begin() + data, cbor.begin() + stop));
+}
+
+std::optional<Bytes> put_payload(const Bytes& cbor, const Bytes& payload) {
+    At a{cbor};
+    size_t start, stop;
+    if (!a.payload(start, stop)) return std::nullopt;
+    Bytes out(cbor.begin(), cbor.begin() + start);
+    push_bytes(out, payload);
+    out.insert(out.end(), cbor.begin() + stop, cbor.end());
+    return out;
+}
+
+Bytes substream_box(const Bytes& blob, size_t max, size_t i) {
+    size_t size = max - 1, lo = std::min(i * size, blob.size()), hi = std::min((i + 1) * size, blob.size());
+    Bytes out{(uint8_t)(i + 1 < chunk_count(blob.size(), max) ? 'C' : 'F')};
+    out.insert(out.end(), blob.begin() + lo, blob.begin() + hi);
+    return out;
+}
+
+Bytes indirection(size_t total, const Bytes& read_cap) {
+    Bytes out{'I', (uint8_t)(total >> 24), (uint8_t)(total >> 16), (uint8_t)(total >> 8), (uint8_t)total};
+    out.insert(out.end(), read_cap.begin(), read_cap.end());
+    return out;
+}
+
+std::optional<Bytes> assemble(const std::vector<Bytes>& boxes) {
+    if (boxes.empty() || boxes.back().empty() || boxes.back()[0] != 'F') return std::nullopt;
+    Bytes out;
+    for (size_t i = 0; i < boxes.size(); i++) {
+        if (i + 1 < boxes.size() && (boxes[i].empty() || boxes[i][0] != 'C')) return std::nullopt;
+        out.insert(out.end(), boxes[i].begin() + 1, boxes[i].end());
+    }
+    return out;
 }
 
 // ---- ReplyWho ----

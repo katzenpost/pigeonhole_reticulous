@@ -132,6 +132,34 @@ int main(int, char** argv) {
         }
     }
 
+    // Files as pigeonhole_protocols writes them (vectors/katzenqt1/files.rs): written alike here,
+    // and read back from its boxes.
+    for (auto& v : load(path, "katzenqt1/files.json")) {
+        Json j = Json::parse(v.s("chunks"));
+        std::vector<Bytes> chunks;
+        for (auto& c : j.a) chunks.push_back(unhex(c.s));
+        auto payload = v.hex("payload"), message = v.hex("message"), read_cap = v.hex("read_cap");
+        size_t max = v.u("box_size");
+        FileUpload f{{}, v.s("filetype"), v.s("basename")};
+        auto content = file_content(v.hex("membership_hash"), f, v.u("version"));
+        check(content == v.hex("content") && filetype_of(f.basename) == f.filetype, v, "the message, written alike");
+        check(put_payload(content, payload) == message && frame(message) == v.hex("box"), v, "its payload put in");
+        check(v.b("fits") == (message.size() + 1 <= max) && chunk_count(message.size(), max) == chunks.size(), v,
+              "as many chunks");
+        bool same = true;
+        for (size_t i = 0; i < chunks.size(); i++) same &= substream_box(message, max, i) == chunks[i];
+        check(same && indirection(chunks.size(), read_cap) == v.hex("indirection"), v, "the chunks and the I box, alike");
+        auto ch = unframe(v.hex("indirection"));
+        check(ch.kind == Chunk::INDIRECTION && ch.total == chunks.size() && ch.data == read_cap, v, "the I box read");
+        check(assemble(chunks) == message, v, "its chunks assembled");
+        auto t = take_payload(message);
+        auto g = Gcm::from_bytes(message);
+        auto file = g ? file_of(*g) : std::nullopt;
+        check(t && t->first == content && t->second == payload && message_from_cbor(t->first), v, "its payload taken out");
+        check(file && file->payload == payload && file->filetype == f.filetype && file->basename == f.basename, v,
+              "the file read");
+    }
+
     Vec v{"kq1", "unit", {}};
     Bytes H(HASH_SIZE, 0);
     auto text = text_content(H, "hello", CURRENT_VERSION);
@@ -159,5 +187,12 @@ int main(int, char** argv) {
     IntroRef r{9, Bytes(INDEX_SIZE, 5)};
     check(introduced_at_from_bytes(introduced_at_to_bytes(r)) == r, v, "introduced_at round trip");
     check(unframe(Bytes{'I', 0, 0, 0, 3}).kind == Chunk::UNKNOWN, v, "short I box");
+    check(safe_name("../.x/é\x01.opus") == "_.x___.opus" && safe_name("...") == "unnamed" &&
+              safe_name(std::string(300, 'a')).size() == 200, v, "safe names");
+    check(std::string(filetype_of("A.OPUS")) == "audio/opus" && std::string(filetype_of("x.")) == "arbitrary" &&
+              std::string(filetype_of("noext")) == "arbitrary", v, "file types");
+    check(chunk_count(1548, 1549) == 1 && chunk_count(1549, 1549) == 2 && chunk_count(3096, 1549) == 2 &&
+              chunk_count(3097, 1549) == 3, v, "chunk counts at the edges");
+    check(!take_payload(text) && !put_payload(text, Bytes{1}), v, "a text has no payload");
     return finish("kq1");
 }
