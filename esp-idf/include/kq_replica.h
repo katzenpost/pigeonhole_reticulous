@@ -24,6 +24,8 @@ public:
     using WriteDone = std::function<void(uint8_t code)>;  // SUCCESS, ALREADY_EXISTS, or a failure code
     using ReadDone = std::function<void(const ReadOutcome&)>;
 
+    // Reads and writes each have this many in flight, so that reads a replica is slow to miss
+    // (the namenlos bridge takes up to 40 s) do not hold back a burst's writes.
     static constexpr size_t kMaxInFlight = 2;
     static constexpr uint32_t kTimeoutMs = 60000;
 
@@ -47,6 +49,7 @@ public:
 
 private:
     struct Req {
+        bool write = false;
         Bytes query;
         std::function<void(const std::optional<wire::Reply>&)> on_reply;
         uint32_t sent_at = 0;
@@ -61,6 +64,7 @@ private:
     uint32_t now_ = 0;
     std::deque<Req> queue_;
     std::map<uint16_t, Req> in_flight_;
+    size_t flying(bool write) const;
     wire::Reassembler reasm_;
 };
 

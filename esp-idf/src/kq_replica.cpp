@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "kq_replica.h"
 
+#include <algorithm>
+
 namespace kq {
 
 static const uint8_t* ctx() { return (const uint8_t*)bacap::kPigeonholeCtx; }
@@ -11,6 +13,7 @@ bool ReplicaClient::write(const bacap::WriteCap& w, const bacap::Index& idx, con
     if (!padded) return false;
     auto s = bacap::encrypt(w, idx, ctx(), kCtxLen, padded->data(), padded->size());
     Req r;
+    r.write = true;
     r.query = wire::write_query(s.box_id.data(), s.signature.data(), s.ciphertext.data(), s.ciphertext.size());
     r.on_reply = [done](const std::optional<wire::Reply>& rep) { done(rep ? rep->code : (uint8_t)wire::INTERNAL_ERROR); };
     enqueue(std::move(r));
@@ -21,6 +24,7 @@ void ReplicaClient::tombstone(const bacap::WriteCap& w, const bacap::Index& idx,
     auto id = bacap::box_id(w.root_pk, idx, ctx(), kCtxLen);
     auto sig = bacap::sign_box(w, idx, ctx(), kCtxLen, nullptr, 0);
     Req r;
+    r.write = true;
     r.query = wire::write_query(id->data(), sig.data(), nullptr, 0);
     r.on_reply = [done](const std::optional<wire::Reply>& rep) { done(rep ? rep->code : (uint8_t)wire::INTERNAL_ERROR); };
     enqueue(std::move(r));
@@ -55,10 +59,19 @@ void ReplicaClient::enqueue(Req r) {
     if (up_) pump(now_);
 }
 
+size_t ReplicaClient::flying(bool write) const {
+    size_t n = 0;
+    for (auto& [_, r] : in_flight_) n += r.write == write;
+    return n;
+}
+
+// The first queued request of each kind goes out while its kind has room, in order within a kind.
 void ReplicaClient::pump(uint32_t now_ms) {
-    while (up_ && !queue_.empty() && in_flight_.size() < kMaxInFlight) {
-        Req r = std::move(queue_.front());
-        queue_.pop_front();
+    while (up_) {
+        auto it = std::find_if(queue_.begin(), queue_.end(), [&](const Req& q) { return flying(q.write) < kMaxInFlight; });
+        if (it == queue_.end()) return;
+        Req r = std::move(*it);
+        queue_.erase(it);
         uint16_t id = next_id_++;
         if (next_id_ == 0) next_id_ = 1;
         auto frames = wire::split(id, r.query.data(), r.query.size(), piece_);

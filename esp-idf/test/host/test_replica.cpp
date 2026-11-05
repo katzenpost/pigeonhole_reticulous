@@ -63,8 +63,14 @@ int main(int, char**) {
     c.tick(ReplicaClient::kTimeoutMs);
     check(reads.size() == before + 2 && reads.back().kind == ReadOutcome::FAILED && c.pending() == 1, v,
           "timed out; the queued one goes out");
+    // Reads the replica sits on do not hold back a write: it has its own room.
+    c.read(r.root_pk, r.index, got);
+    c.read(r.root_pk, r.index, got);
+    size_t sentBefore = sent, codesBefore = codes.size();
+    c.write(w, *next.next(), Bytes{'w'}, wrote);
+    check(sent == sentBefore + 4 && c.pending() == 4, v, "a write goes out past two reads in flight and one queued");
     c.reset();
-    check(reads.size() == before + 3 && c.pending() == 0, v, "reset fails the rest");
+    check(reads.size() == before + 5 && codes.size() == codesBefore + 1 && c.pending() == 0, v, "reset fails the rest");
     rep.answer = true;
     c.read(r.root_pk, r.index, got);
     check(c.pending() == 1, v, "held while down");

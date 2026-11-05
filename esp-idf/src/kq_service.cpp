@@ -181,18 +181,41 @@ static void openChannel() {
 static kq::Runtime* s_rt = nullptr;
 static kq::Store* s_store = nullptr;  // once the chats are open
 static kq::Vault* s_vault = nullptr;
-static kq::ReplicaBackend* s_backend = nullptr;
 static SemaphoreHandle_t s_mu = nullptr;  // the engine's state, which the CLI reads
-static QueueHandle_t s_lightQ = nullptr, s_heavyQ = nullptr, s_doneQ = nullptr, s_bridgeQ = nullptr;
-static bool s_lightIdle = true, s_heavyIdle = true;
+static QueueHandle_t s_doneQ = nullptr, s_bridgeQ = nullptr;
 
-static bool heavy(const kq1::Action& a) {
-    return a.kind == kq1::Action::MINT || a.kind == kq1::Action::SEAL || a.kind == kq1::Action::AWAIT_REPLY;
+// The workers: one for CTIDH, which takes minutes; two for reads and two for writes, as many as
+// the replica client has in flight of each, so that a read the replica is slow to miss holds back
+// neither the other reads nor a burst's writes.
+enum WorkKind { WORK_HEAVY, WORK_READ, WORK_WRITE };
+struct Worker {
+    WorkKind kind;
+    const char* name;
+    QueueHandle_t q = nullptr;
+    bool idle = true;
+};
+static Worker s_workers[] = {{WORK_HEAVY, "kq.ctidh"}, {WORK_READ, "kq.read"}, {WORK_READ, "kq.read"},
+                             {WORK_WRITE, "kq.write"}, {WORK_WRITE, "kq.write"}};
+static constexpr size_t kWorkers = sizeof s_workers / sizeof s_workers[0];
+
+static WorkKind kindOf(const kq1::Action& a) {
+    switch (a.kind) {
+        case kq1::Action::MINT: case kq1::Action::SEAL: case kq1::Action::AWAIT_REPLY: return WORK_HEAVY;
+        case kq1::Action::WRITE: case kq1::Action::WRITE_CHUNK: case kq1::Action::SUBSTREAM:
+        case kq1::Action::CHUNK_INDEXES: case kq1::Action::PUBLISH: case kq1::Action::LOAD: case kq1::Action::DELETE:
+            return WORK_WRITE;
+        default: return WORK_READ;
+    }
+}
+
+static Worker* idleWorker(WorkKind k) {
+    for (auto& w : s_workers) if (w.kind == k && w.idle) return &w;
+    return nullptr;
 }
 
 struct Finished {
     kq1::Done done;
-    bool heavy;
+    Worker* by;
 };
 
 struct BridgeReq {
@@ -211,9 +234,13 @@ static void bridge(std::function<void(std::function<void()>)> fn) {
 }
 
 static void workerMain(void* arg) {
-    bool isHeavy = arg != nullptr;
-    QueueHandle_t q = isHeavy ? s_heavyQ : s_lightQ;
-    kq1::Executor x{*s_backend, [](uint64_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); },
+    Worker* me = static_cast<Worker*>(arg);
+    bool isHeavy = me->kind == WORK_HEAVY;
+    QueueHandle_t q = me->q;
+    // Its own backend: the workers run at once, and a backend keeps what went wrong last. A
+    // voucher is minted and its reply opened on the one CTIDH worker, whose backend remembers it.
+    kq::ReplicaBackend backend(*s_client, bridge);
+    kq1::Executor x{backend, [](uint64_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); },
                     {[](const std::string& f) -> std::optional<kq::Bytes> {
                          auto d = s_vault->files().read(f);
                          return d ? std::optional<kq::Bytes>(kq::Bytes(d->begin(), d->end())) : std::nullopt;
@@ -224,7 +251,7 @@ static void workerMain(void* arg) {
         if (xQueueReceive(q, &a, portMAX_DELAY) != pdTRUE || !a) continue;
         // Tasks idle at the clock's floor; CTIDH is worth the full 240 MHz.
         if (isHeavy) pmBoost();
-        auto* f = new Finished{x.perform(*a), isHeavy};
+        auto* f = new Finished{x.perform(*a), me};
         if (isHeavy) pmBoostEnd();
         delete a;
         xQueueSend(s_doneQ, &f, portMAX_DELAY);
@@ -244,18 +271,16 @@ static void pumpClient() {
     Finished* f;
     while (xQueueReceive(s_doneQ, &f, 0) == pdTRUE) {
         s_rt->finished(nowS(), nowMs(), f->done);
-        (f->heavy ? s_heavyIdle : s_lightIdle) = true;
+        f->by->idle = true;
         delete f;
     }
     s_rt->tick(nowS(), nowMs());
     // The runtime hands out the next action of the kind an idle worker takes.
-    while (auto a = s_rt->take_if([](const kq1::Action& x) {
-        return heavy(x) ? s_heavyIdle : s_lightIdle;
-    })) {
-        bool h = heavy(*a);
+    while (auto a = s_rt->take_if([](const kq1::Action& x) { return idleWorker(kindOf(x)) != nullptr; })) {
+        Worker* w = idleWorker(kindOf(*a));
         auto* p = new kq1::Action(std::move(*a));
-        xQueueSend(h ? s_heavyQ : s_lightQ, &p, portMAX_DELAY);
-        (h ? s_heavyIdle : s_lightIdle) = false;
+        xQueueSend(w->q, &p, portMAX_DELAY);
+        w->idle = false;
     }
     xSemaphoreGive(s_mu);
 }
@@ -767,8 +792,8 @@ static void kqTaskMain(void*) {
     storageSubscribeChanges("kq.cmd.", onCmd);
     storageSubscribeChanges("s.kq.wire_version", onWireVersion);
     onWireVersion(nullptr, nullptr);
-    spawnTask(workerMain, "kq.io", kLightStack, nullptr, 1, 1, STACK_PSRAM);
-    spawnTask(workerMain, "kq.ctidh", kHeavyStack, (void*)1, 1, 1, STACK_PSRAM);
+    for (auto& w : s_workers)
+        spawnTask(workerMain, w.name, w.kind == WORK_HEAVY ? kHeavyStack : kLightStack, &w, 1, 1, STACK_PSRAM);
     for (;;) {
         connectAnnounces();
         while (!s_stop) {
@@ -819,11 +844,9 @@ void KqService::onInit() {
     s_client = new kq::ReplicaClient((size_t)storageGetInt("s.kq.box_size", 1549), sendFrame);
     s_probe = new kq::Probe(*s_client, nowMs, [](uint8_t* p, size_t n) { randombytes_buf(p, n); });
     s_mu = xSemaphoreCreateMutex();
-    s_lightQ = xQueueCreate(1, sizeof(kq1::Action*));
-    s_heavyQ = xQueueCreate(1, sizeof(kq1::Action*));
-    s_doneQ = xQueueCreate(2, sizeof(Finished*));
-    s_bridgeQ = xQueueCreate(2, sizeof(BridgeReq*));
-    s_backend = new kq::ReplicaBackend(*s_client, bridge);
+    for (auto& w : s_workers) w.q = xQueueCreate(1, sizeof(kq1::Action*));
+    s_doneQ = xQueueCreate(kWorkers, sizeof(Finished*));
+    s_bridgeQ = xQueueCreate(kWorkers, sizeof(BridgeReq*));
     s_rt = new kq::Runtime(kq1::State{storageGetStr("s.kq.name", "kq"), {}}, s_client->box_size());
     // A file is held whole in PSRAM as it is sent or fetched.
     s_rt->eng.max_file = 1 << 20;
