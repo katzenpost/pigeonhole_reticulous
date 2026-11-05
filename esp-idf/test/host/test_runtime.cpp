@@ -88,8 +88,11 @@ int main(int, char**) {
     check(!code.empty(), v, "bob has a voucher code");
     printf("bob's voucher code: %s\n", code.c_str());
 
+    // As hushphone shows a code: in groups of eight, and pasted with its newline.
+    std::string grouped;
+    for (size_t i = 0; i < code.size(); i += 8) grouped += (i ? " " : "") + code.substr(i, 8);
     Input ind = make(Input::INDUCT);
-    ind.code = code;
+    ind.code = grouped + "\n";
     alice.in(ind, t);
     run(both, t, t + 600000);
     check(bob.chat() && bob.chat()->group.has_value(), v, "bob joined");
