@@ -11,6 +11,7 @@
 
 #include "lcd.h"
 #include "lcd_input_box.h"
+#include "kq_qr.h"
 #include "kq_view.h"
 
 namespace {
@@ -392,7 +393,39 @@ const char* markOf(KqLine::Mark m) {
 
 bool atBottom() { return !s_log || lv_obj_get_scroll_bottom(s_log) <= 4; }
 
-// The voucher, in large mono type, while it waits to be given out.
+// lv_canvas_set_draw_buf drops any image cache entry at the address, so a reused one is not stale.
+void freeQr(lv_event_t* e) { lv_draw_buf_destroy((lv_draw_buf_t*)lv_event_get_user_data(e)); }
+
+// The QR code of text, px pixels a module: dark on light in either theme, with a 4-module quiet
+// zone. Buffers come from LVGL's heap, in PSRAM on the device.
+lv_obj_t* mkQr(lv_obj_t* parent, const std::string& text, int px) {
+    size_t n = qrcodegen_BUFFER_LEN_FOR_VERSION(kKqQrMax);
+    auto* qr = (uint8_t*)lv_malloc(2 * n);
+    if (!qr) return nullptr;
+    lv_draw_buf_t* buf = nullptr;
+    if (kqQr(text, qr, qr + n)) {
+        int side = (qrcodegen_getSize(qr) + 8) * px;
+        buf = lv_draw_buf_create(side, side, LV_COLOR_FORMAT_I1, LV_STRIDE_AUTO);
+        if (buf) {
+            lv_draw_buf_clear(buf, nullptr);
+            lv_draw_buf_set_palette(buf, 0, lv_color32_make(0xFF, 0xFF, 0xFF, 0xFF));
+            lv_draw_buf_set_palette(buf, 1, lv_color32_make(0, 0, 0, 0xFF));
+            uint8_t* d = buf->data + 8;  // past the two palette entries
+            for (int y = 0; y < side; y++)
+                for (int x = 0; x < side; x++)
+                    if (qrcodegen_getModule(qr, x / px - 4, y / px - 4))
+                        d[y * buf->header.stride + x / 8] |= 0x80 >> (x % 8);
+        }
+    }
+    lv_free(qr);
+    if (!buf) return nullptr;
+    lv_obj_t* cv = lv_canvas_create(parent);
+    lv_canvas_set_draw_buf(cv, buf);
+    lv_obj_add_event_cb(cv, freeQr, LV_EVENT_DELETE, buf);
+    return cv;
+}
+
+// The voucher, as a QR code and in large mono type beside it, while it waits to be given out.
 void drawVoucher(const KqChat& c) {
     if (!s_voucher) return;
     lv_obj_clean(s_voucher);
@@ -402,8 +435,16 @@ void drawVoucher(const KqChat& c) {
         mkWrap(s_voucher, "Making your voucher. This takes a while on this device.", C_AMBER, kSmall);
         return;
     }
-    mkWrap(s_voucher, "Your voucher code: a member of the group types it into Add member.", C_AMBER, kSmall);
-    mkWrap(s_voucher, c.voucher, 0xFFFFFF, kBig);
+    lv_obj_t* row = mkRowBox(s_voucher, lcdPx(6));
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    mkQr(row, c.voucher, lcdPx(3));
+    lv_obj_t* col = mkBox(row);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(col, lcdPx(4), 0);
+    mkWrap(col, "Your voucher code: a member of the group scans it or types it into Add member.", C_AMBER,
+           kSmall);
+    mkWrap(col, c.voucher, 0xFFFFFF, kBig);
 }
 
 void drawChat(bool force) {

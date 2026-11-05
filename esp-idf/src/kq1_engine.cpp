@@ -60,13 +60,14 @@ std::string voucher_code(const Bytes& v) {
     return s;
 }
 
+// Whitespace is skipped: hushphone shows a code in groups of eight.
 static std::optional<Bytes> from_code(const std::string& code) {
     Bytes b(code.size());
     size_t n = 0;
     const char* end = nullptr;
-    if (sodium_base642bin(b.data(), b.size(), code.data(), code.size(), nullptr, &n, &end,
+    if (sodium_base642bin(b.data(), b.size(), code.data(), code.size(), " \t\r\n", &n, &end,
                           sodium_base64_VARIANT_ORIGINAL) != 0 ||
-        end != code.data() + code.size())
+        end != code.data() + code.size() || n != 32)
         return std::nullopt;
     b.resize(n);
     return b;

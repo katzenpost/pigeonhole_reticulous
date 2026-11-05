@@ -292,6 +292,15 @@ static void onCmd(const char* key, const char* val) {
     xSemaphoreGive(s_mu);
 }
 
+// s.kq.wire_version: the katzenqt1 wire version written and minted, 4 (compact vouchers) or 3
+// (long ones), for founders that read only those: kpclientd on hpqc v0.0.95.
+static void onWireVersion(const char*, const char*) {
+    uint64_t v = storageGetInt("s.kq.wire_version", 4) == 3 ? kq1::MAP_VERSION : kq1::CURRENT_VERSION;
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    s_rt->eng.wire_version = v;
+    xSemaphoreGive(s_mu);
+}
+
 // ---- the chats on flash, under fsStateDir()/kq ----
 
 static kq::StoreFiles fsFiles(const std::string& dir) {
@@ -501,6 +510,7 @@ static void benchMain(void* arg) {
         killSelf();
     }
     bool ctidh = kind == BENCH_CTIDH;
+    info("bench: CTIDH field %s", KQ_CTIDH_FIELD_NAME);
     static uint64_t y[16];
     randombytes_buf(y, sizeof y);
     y[15] &= (1ull << 59) - 1;
@@ -610,7 +620,8 @@ static void cliKq(const char* args) {
     for (auto& [d, r] : s_replicas) cliPrintf("  %s hops %d flags %d\n", d.c_str(), r.hops, r.flags);
     cliPrintf("channel: %s %s\n", s_chanDest.empty() ? "-" : s_chanDest.c_str(),
               s_chan < 0 ? "closed" : s_chanUp ? "up" : "opening");
-    cliPrintf("requests pending: %u, box size %u\n", (unsigned)s_client->pending(), (unsigned)s_client->box_size());
+    cliPrintf("requests pending: %u, box size %u, wire version %u\n", (unsigned)s_client->pending(),
+              (unsigned)s_client->box_size(), (unsigned)s_rt->eng.wire_version);
     cliPrintf("frames sent %u, refused %u, received %u\n", s_sent, s_sendFail, s_recv);
     cliPrintf("probe: %s\n", s_probe->write.ms.empty() && !s_probe->write.failed && !s_probe->running()
                                 ? "-" : s_probe->status().c_str());
@@ -631,6 +642,8 @@ static void kqTaskMain(void*) {
     kq::Vault::boost = [](bool on) { on ? pmBoost() : pmBoostEnd(); };
     s_vault = new kq::Vault(fsFiles(dir));
     storageSubscribeChanges("kq.cmd.", onCmd);
+    storageSubscribeChanges("s.kq.wire_version", onWireVersion);
+    onWireVersion(nullptr, nullptr);
     spawnTask(workerMain, "kq.io", kLightStack, nullptr, 1, 1, STACK_PSRAM);
     spawnTask(workerMain, "kq.ctidh", kHeavyStack, (void*)1, 1, 1, STACK_PSRAM);
     for (;;) {
@@ -673,6 +686,7 @@ void KqService::onInit() {
     storageBegin();
     storageDefault("s.kq.box_size", 1549);
     storageDefault("s.kq.name", "kq");
+    storageDefault("s.kq.wire_version", 4);
     storageEnd();
     s_client = new kq::ReplicaClient((size_t)storageGetInt("s.kq.box_size", 1549), sendFrame);
     s_probe = new kq::Probe(*s_client, nowMs, [](uint8_t* p, size_t n) { randombytes_buf(p, n); });

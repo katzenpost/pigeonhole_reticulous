@@ -2,7 +2,7 @@
 # MBEDTLS_DIR names an mbedTLS 3.6 install prefix when it is not a system package.
 include ../kq.mk
 
-TESTS := test_bacap test_nike test_wire test_kq1 test_voucher test_replica test_member test_client test_runtime test_store test_vault test_field test_ogg
+TESTS := test_bacap test_nike test_wire test_kq1 test_voucher test_replica test_member test_client test_runtime test_store test_vault test_field test_qr test_ogg
 
 all: $(addprefix $(B)/,$(TESTS)) $(B)/vectors.txt
 	@for t in $(TESTS); do $(B)/$$t $(B)/vectors.txt || exit 1; done
@@ -13,6 +13,10 @@ $(B)/vectors.txt: gen_vectors.py $(shell find vectors -name '*.json')
 
 $(B)/%: %.cpp vectors.h $(KQ_O) $(VOICE_O) $(SODIUM_O) $(CTIDH_O)
 	$(CXX) $(CXXFLAGS) $< $(KQ_O) $(VOICE_O) $(SODIUM_O) $(CTIDH_O) -o $@ $(LDLIBS)
+
+# Decodes the voucher QR code with zbarimg (zbar-tools).
+$(B)/test_qr: test_qr.cpp vectors.h $(QR)/kq_qr.h $(QR_O) $(KQ_O) $(SODIUM_O) $(CTIDH_O)
+	$(CXX) $(CXXFLAGS) $< $(QR_O) $(KQ_O) $(SODIUM_O) $(CTIDH_O) -o $@ $(LDLIBS)
 
 clean:
 	rm -rf build build-*

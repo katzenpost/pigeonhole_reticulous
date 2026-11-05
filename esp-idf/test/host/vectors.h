@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -30,8 +31,14 @@ struct Vec {
     bool b(const std::string& k) const { return s(k) == "true"; }
 };
 
+// vectors.txt's text, where there is no file to read it from (test/qemu-voucher).
+inline const char* g_vectors_text = nullptr;
+
 inline std::vector<Vec> load(const char* path, const std::string& file) {
-    std::ifstream in(path);
+    std::ifstream f;
+    std::istringstream s(g_vectors_text ? g_vectors_text : "");
+    if (!g_vectors_text) f.open(path);
+    std::istream& in = g_vectors_text ? static_cast<std::istream&>(s) : f;
     std::vector<Vec> out;
     std::string line;
     while (std::getline(in, line)) {
