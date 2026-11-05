@@ -81,28 +81,56 @@ static void page(Bytes& out, uint8_t type, uint64_t granule, uint32_t serial, ui
     for (int i = 0; i < 4; i++) out[at + 22 + i] = (uint8_t)(c >> (8 * i));
 }
 
-Bytes mux(const Opus& o, uint32_t serial) {
+Bytes Muxer::start() {
+    const Opus& o = head_;
     Bytes head{'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, o.channels, (uint8_t)o.pre_skip, (uint8_t)(o.pre_skip >> 8)};
     for (int i = 0; i < 4; i++) head.push_back((uint8_t)(o.input_rate >> (8 * i)));
     head.insert(head.end(), {0, 0, 0});  // output gain 0, mapping family 0
     static const char vendor[] = "kq";
     Bytes tags{'O', 'p', 'u', 's', 'T', 'a', 'g', 's', sizeof vendor - 1, 0, 0, 0, 'k', 'q', 0, 0, 0, 0};
     Bytes out;
-    uint32_t seq = 0;
-    page(out, 2, 0, serial, seq++, {&head});
-    page(out, 0, 0, serial, seq++, {&tags});
-    uint64_t granule = 0;
-    for (size_t i = 0; i < o.packets.size();) {
+    page(out, 2, 0, serial_, seq_++, {&head});
+    page(out, 0, 0, serial_, seq_++, {&tags});
+    return out;
+}
+
+Bytes Muxer::add(const Bytes& packet) {
+    Bytes out;
+    size_t segs = packet.size() / 255 + 1;
+    // A page holds at most 255 lacing values; 50 packets of 20 ms make one second per page.
+    if (page_.size() == 50 || segs_ + segs > 255) {
         std::vector<const Bytes*> ps;
-        size_t segs = 0;
-        // A page holds at most 255 lacing values; 50 packets of 20 ms make one second per page.
-        while (i < o.packets.size() && ps.size() < 50 && segs + o.packets[i].size() / 255 + 1 <= 255) {
-            segs += o.packets[i].size() / 255 + 1;
-            granule += packet_us(o.packets[i]) * 48 / 1000;
-            ps.push_back(&o.packets[i++]);
-        }
-        page(out, i == o.packets.size() ? 4 : 0, granule, serial, seq++, ps);
+        for (auto& q : page_) ps.push_back(&q);
+        page(out, 0, granule_, serial_, seq_++, ps);
+        page_.clear();
+        segs_ = 0;
     }
+    page_.push_back(packet);
+    segs_ += segs;
+    granule_ += packet_us(packet) * 48 / 1000;
+    return out;
+}
+
+Bytes Muxer::finish() {
+    Bytes out;
+    if (page_.empty()) return out;
+    std::vector<const Bytes*> ps;
+    for (auto& q : page_) ps.push_back(&q);
+    page(out, 4, granule_, serial_, seq_++, ps);
+    page_.clear();
+    segs_ = 0;
+    return out;
+}
+
+Bytes mux(const Opus& o, uint32_t serial) {
+    Muxer m(o, serial);
+    Bytes out = m.start();
+    for (auto& p : o.packets) {
+        Bytes pg = m.add(p);
+        out.insert(out.end(), pg.begin(), pg.end());
+    }
+    Bytes last = m.finish();
+    out.insert(out.end(), last.begin(), last.end());
     return out;
 }
 

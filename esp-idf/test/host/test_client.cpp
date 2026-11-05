@@ -169,6 +169,7 @@ struct World {
     std::set<size_t> held;
     std::map<size_t, std::string> delay_next;
     std::map<size_t, std::vector<Input>> delayed;
+    std::map<std::string, size_t> performed;  // actions carried out, by kind
 
     size_t who(const std::string& name) {
         for (size_t i = 0; i < members.size(); i++) if (members[i].name == name) return i;
@@ -200,6 +201,7 @@ struct World {
                                           },
                                           [kept](const std::string& f) { kept->erase(f); }}};
         std::string kind = kind_of(a);
+        performed[kind]++;
         Done o = x.perform(a);
         if (o.kind == Done::DONE && delay_next.count(w) && delay_next[w] == kind) {
             delay_next.erase(w);
@@ -524,6 +526,46 @@ static void dump_upload(const World& w, const std::string& what, const std::stri
                                 {"indirection", Json::str(tohex(ibox))}, {"read_cap", Json::str(tohex(unframe(ibox).data))}}));
 }
 
+// A burst sent as it is made: started, its bytes given piece by piece with time passing between
+// them, ended. How many chunks went out while it was made, and how many after its end.
+struct Streamed { size_t during = 0, after = 0; };
+static Streamed stream_send(World& w, size_t i, const std::string& name, const Bytes& payload, size_t piece,
+                            uint64_t gap_ms) {
+    auto in = [&](Input::Kind k) {
+        Input x(k);
+        x.chat = "g";
+        x.name = name;
+        return x;
+    };
+    w.feed(i, in(Input::STREAM_START));
+    size_t before = w.performed["WriteChunk"];
+    for (size_t at = 0; at < payload.size(); at += piece) {
+        Input d = in(Input::STREAM_DATA);
+        d.bytes = Bytes(payload.begin() + at, payload.begin() + std::min(at + piece, payload.size()));
+        w.feed(i, d);
+        w.run_to(w.clock + gap_ms);
+    }
+    Streamed r;
+    r.during = w.performed["WriteChunk"] - before;
+    w.feed(i, in(Input::STREAM_END));
+    before = w.performed["WriteChunk"];
+    w.run_to(w.clock + 60000);
+    r.after = w.performed["WriteChunk"] - before;
+    return r;
+}
+
+// The substream boxes of the upload in the sim that carries this payload.
+static std::vector<Bytes> upload_of(const World& w, const Bytes& payload) {
+    for (auto& [k, b] : w.sim.boxes) {
+        if (b.second.empty() || b.second[0] != 'I') continue;
+        auto cs = substream_of(w, b.second);
+        auto m = assemble(cs);
+        auto t = m ? take_payload(*m) : std::nullopt;
+        if (t && t->second == payload) return cs;
+    }
+    return {};
+}
+
 static void file_tests(const char* out_path) {
     Vec v{"client", "files", {}};
     {
@@ -573,18 +615,94 @@ static void file_tests(const char* out_path) {
         std::ifstream in("vectors/hushphone/tone.opus", std::ios::binary);
         Bytes tone((std::istreambuf_iterator<char>(in)), {});
         auto o = kq::ogg::demux(tone.data(), tone.size());
-        kq::radio::Recorder rec;
+        kq::radio::Recorder rec(3);
         for (auto& p : o->packets) {
             Bytes m{kq::radio::kEvBatch, 1, (uint8_t)(p.size() + 1), 0, kq::radio::kCodecOpus};
             m.insert(m.end(), p.begin(), p.end());
             rec.batch(m.data(), m.size());
         }
-        auto [clip, name] = rec.finish(3);
+        rec.end();
+        Bytes clip = rec.take();
+        uint8_t r32[32] = {1};
+        std::string name = kq::radio::burst_name(r32);
         send_file(w, 0, name, clip);
         w.run_to(w.clock + 600000);
         auto a = attachment(w, 1, name);
         check(a && a->filetype == "audio/opus" && file(w, 1, name) == clip, v, "a recorded burst arrives as a voice clip");
         if (out_path) dump_upload(w, "C++ engine: a recorded burst", "audio/opus", name, clip, 2);
+    }
+    {
+        // A burst streamed while it is made: its chunks go out as they fill, so that after the talk
+        // key is let go only the first (with the length) and the last are left to write.
+        World w;
+        found_and_join(w);
+        for (auto& m : w.members) m.eng.radio.insert("g");
+        std::ifstream in("vectors/hushphone/tone.opus", std::ios::binary);
+        Bytes tone((std::istreambuf_iterator<char>(in)), {});
+        auto o = kq::ogg::demux(tone.data(), tone.size());
+        kq::ogg::Opus twelve = *o;
+        for (int k = 0; k < 11; k++) twelve.packets.insert(twelve.packets.end(), o->packets.begin(), o->packets.end());
+        Bytes clip = kq::ogg::mux(twelve, 4);  // 12 s, about 18 KB: 13 chunks
+        auto r = stream_send(w, 0, "aa.opus", clip, 1550, 1000);
+        auto& bob = w.members[1];
+        check(bob.clips.size() == 1 && bob.clips[0].bytes == clip && bob.clips[0].name == "aa.opus", v,
+              "a streamed burst is heard whole");
+        check(r.during >= 10 && r.after <= 2, v, "its chunks went out while it was made, two after its end");
+        if (out_path) dump_upload(w, "C++ engine: a burst streamed as it was made", "audio/opus", "aa.opus", clip, 13);
+        bool saved = false;
+        std::string raw(clip.begin() + 5000, clip.begin() + 5040);
+        for (auto& [_, d] : *w.members[0].files) saved |= d.find(raw) != std::string::npos || d.find(tohex(Bytes(raw.begin(), raw.end()))) != std::string::npos;
+        check(!saved && w.chat(0, "g")->jobs.empty(), v, "and none of it was saved");
+
+        // Where its chunks end: one chunk, two, a message ending on a chunk's edge, the 2-byte and
+        // 4-byte payload lengths' edges, and the most a burst lasts.
+        size_t box = 1530 - 1, edgeDone = 0;
+        auto exact = [&](const Bytes& p, const std::string& name) {
+            bob.clips.clear();
+            stream_send(w, 0, name, p, 4000, 300);
+            return bob.clips.size() == 1 && bob.clips[0].bytes == p;
+        };
+        bool ok = true;
+        for (size_t n : {size_t(10), size_t(1400), size_t(2000), size_t(65535), size_t(65536), size_t(108000)})
+            ok &= exact(bytes_of(n, n), "n" + std::to_string(n) + ".opus");
+        check(ok, v, "1 and 2 chunks, and payloads of 65535, 65536 and 108000 bytes");
+        // A message of exactly two chunks: its size found from one streamed before it.
+        {
+            size_t overhead = 0;
+            for (auto& c : upload_of(w, bytes_of(108000, 108000))) overhead += c.size() - 1;
+            overhead -= 108000;
+            bool all = overhead > 0 && overhead < 400;
+            for (size_t n = 2 * box - overhead - 2; all && n <= 2 * box - overhead + 2; n++) {
+                Bytes p = bytes_of(n, 1);
+                all &= exact(p, "e" + std::to_string(n) + ".opus");
+                size_t sz = 0;
+                auto cs = upload_of(w, p);
+                for (auto& c : cs) sz += c.size() - 1;
+                if (sz == 2 * box && cs.size() == 2 && cs[1][0] == 'F') edgeDone++;
+            }
+            check(all && edgeDone >= 1, v, "a message exactly two chunks long");
+        }
+
+        // A restart while it is made: it is lost, says so, and the next one goes.
+        Input st(Input::STREAM_START);
+        st.chat = "g";
+        st.name = "lost.opus";
+        w.feed(0, st);
+        Input d(Input::STREAM_DATA);
+        d.chat = "g";
+        d.name = "lost.opus";
+        d.bytes = bytes_of(6000, 2);
+        w.feed(0, d);
+        for (int k = 0; k < 4; k++) w.act();
+        auto& alice = w.members[0];
+        w.queue.erase(std::remove_if(w.queue.begin(), w.queue.end(), [](auto& q) { return q.first == 0; }), w.queue.end());
+        w.later.erase(std::remove_if(w.later.begin(), w.later.end(), [](auto& l) { return l.who == 0; }), w.later.end());
+        alice.eng = Engine(kq::Store(kq::memory_files(*alice.files)).load(alice.name), 1530);
+        alice.eng.radio.insert("g");
+        w.release(0, alice.eng.resume(0));
+        w.run_to(w.clock + 600000);
+        bool lost = noticed(w, 0, "a message could not be sent: what it held was lost") && w.chat(0, "g")->jobs.empty();
+        check(lost && exact(bytes_of(3000, 3), "after.opus"), v, "a restart while it is made loses it; the next one goes");
     }
     {
         // Our own burst in a radio group is held in memory only: no file, no line, no spool, and
@@ -596,13 +714,15 @@ static void file_tests(const char* out_path) {
         Bytes tone((std::istreambuf_iterator<char>(in)), {});
         auto o = kq::ogg::demux(tone.data(), tone.size());
         auto record = [&](size_t n) {
-            kq::radio::Recorder rec;
+            kq::radio::Recorder rec(9);
             for (size_t i = 0; i < n; i++) {
                 Bytes m{kq::radio::kEvBatch, 1, (uint8_t)(o->packets[i].size() + 1), 0, kq::radio::kCodecOpus};
                 m.insert(m.end(), o->packets[i].begin(), o->packets[i].end());
                 rec.batch(m.data(), m.size());
             }
-            return rec.finish(9);
+            rec.end();
+            uint8_t r32[32] = {(uint8_t)n};
+            return std::make_pair(rec.take(), kq::radio::burst_name(r32));
         };
         auto [clip, name] = record(5);
         check(clip.size() + 200 < 1530, v, "a short burst, that would fit one box");

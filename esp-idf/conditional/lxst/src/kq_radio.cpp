@@ -68,6 +68,7 @@ bool s_cut = false;                // sent at the cap: the rest, until the key i
 std::string s_talk;                // the talk group, as last read
 uint32_t s_talkRead = 0, s_openTried = 0, s_keyedAt = 0;
 std::string s_upChat;              // a burst of ours being written, since s_upAt
+std::string s_burst, s_burstTo;    // the burst being made, and the group it goes to
 uint32_t s_upAt = 0;
 
 uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
@@ -77,17 +78,34 @@ void release(Burst& b) {
     b.data = nullptr;
 }
 
+// A burst goes to the talk group as it is made: started at its first frames, each page as it
+// fills, ended as the talk key is let go (or at the cap).
+void streamOn(bool end) {
+    if (s_burst.empty()) {
+        if (s_rec.empty() || s_talk.empty()) return;
+        uint8_t r[32];
+        esp_fill_random(r, sizeof r);
+        s_burst = kq::radio::burst_name(r);
+        s_burstTo = s_talk;
+        kqStream(s_burstTo, s_burst, KqStream::START);
+    }
+    if (end) s_rec.end();
+    kq::Bytes b = s_rec.take();
+    if (!b.empty() || end) kqStream(s_burstTo, s_burst, end ? KqStream::END : KqStream::DATA, b);
+}
+
 void sendBurst(uint32_t now) {
-    if (s_rec.empty() || s_talk.empty()) { s_rec.finish(0); return; }
+    if (s_rec.empty()) { s_rec = kq::radio::Recorder(esp_random()); return; }
     uint32_t ms = s_rec.ms();
     size_t frames = s_rec.frames();
-    auto [clip, name] = s_rec.finish(esp_random());
-    kqSendFile(s_talk, name, clip);
-    s_upChat = s_talk;
+    streamOn(true);
+    s_upChat = s_burstTo;
     s_upAt = now;
-    info("kq radio: sent %.1f s to %s: %u frames, %u bytes, encoder %d us a frame on average, %d at most",
-         ms / 1000.0, s_talk.c_str(), (unsigned)frames, (unsigned)clip.size(), storageGetInt("lxst.stats.enc_us_avg", -1),
+    info("kq radio: sent %.1f s to %s: %u frames, encoder %d us a frame on average, %d at most", ms / 1000.0,
+         s_burstTo.c_str(), (unsigned)frames, storageGetInt("lxst.stats.enc_us_avg", -1),
          storageGetInt("lxst.stats.enc_us_max", -1));
+    s_burst.clear();
+    s_rec = kq::radio::Recorder(esp_random());
 }
 
 // At the cap the burst goes out as if the talk key had been let go; lxst says nothing of the key
@@ -113,6 +131,7 @@ void onLxRecv(int handle, size_t) {
                 s_clock.start(s_keyedAt);
             }
             if (!s_cut && !s_rec.batch(m, n) && s_rec.full()) cut(nowMs());
+            else if (!s_cut) streamOn(false);
             continue;
         }
         if (m[0] == LXST_EV_TALK_END) {

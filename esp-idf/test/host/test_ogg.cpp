@@ -96,7 +96,7 @@ int main(int, char**) {
     check(out == 600 && ended && ordered && f.duration_ms() == 12000, v, "the rest, in order, then the talk end");
 
     // Our own burst: lxst's batches (codec byte first) recorded, then muxed and named.
-    Recorder rec;
+    Recorder rec(5);
     auto batch = [](const std::vector<kq::Bytes>& ps, size_t from, size_t n) {
         kq::Bytes m{kEvBatch, (uint8_t)n};
         for (size_t i = from; i < from + n; i++) {
@@ -108,16 +108,32 @@ int main(int, char**) {
         return m;
     };
     bool all = true;
-    for (size_t i = 0; i < 50; i += 10) all &= rec.batch(batch(o->packets, i, 10).data(), batch(o->packets, i, 10).size());
-    check(all && rec.frames() == 50 && rec.ms() == 1000, v, "a second of batches recorded");
-    auto [burst, name] = rec.finish(5);
+    // Taken as it is made, as the stream is fed: the head pages at once, then a page a second.
+    kq::Bytes burst;
+    std::vector<size_t> taken;
+    for (size_t k = 0; k < 3; k++)
+        for (size_t i = 0; i < 50; i += 10) {
+            all &= rec.batch(batch(o->packets, i, 10).data(), batch(o->packets, i, 10).size());
+            kq::Bytes t = rec.take();
+            taken.push_back(t.size());
+            burst.insert(burst.end(), t.begin(), t.end());
+        }
+    check(all && rec.frames() == 150 && rec.ms() == 3000, v, "three seconds of batches recorded");
+    check(taken[0] > 0 && taken[1] == 0 && taken[5] > 0 && taken[10] > 0, v, "the head pages at once, a page each second");
+    rec.end();
+    kq::Bytes last = rec.take();
+    burst.insert(burst.end(), last.begin(), last.end());
+    kq::ogg::Opus three{1, 312, 16000, {}};
+    for (int k = 0; k < 3; k++) three.packets.insert(three.packets.end(), o->packets.begin(), o->packets.end());
     auto back = kq::ogg::demux(burst.data(), burst.size());
-    check(back && back->packets == o->packets && back->input_rate == 16000 && back->pre_skip == 312 && rec.empty(), v,
-          "the burst demuxes to what was recorded");
-    uint8_t h[crypto_hash_sha256_BYTES];
-    crypto_hash_sha256(h, burst.data(), burst.size());
-    check(name == tohex(kq::Bytes(h, h + sizeof h)) + ".opus" && kq1::filetype_of(name) == std::string("audio/opus"), v,
-          "named as hushphone names a clip");
+    check(back && back->packets == three.packets && back->input_rate == 16000 && back->pre_skip == 312 &&
+              burst == kq::ogg::mux(three, 5), v, "page by page, the burst is what mux makes of it all");
+    uint8_t r32[32];
+    randombytes_buf(r32, sizeof r32);
+    std::string name = burst_name(r32);
+    check(name.size() == 69 && name.substr(0, 64) == tohex(kq::Bytes(r32, r32 + 32)) &&
+              kq1::filetype_of(name) == std::string("audio/opus"), v, "named as hushphone names a clip");
+    rec = Recorder(6);
     kq::Bytes raw = batch(o->packets, 0, 1);
     raw[4] = 0;  // codec byte RAW
     check(!rec.batch(raw.data(), raw.size()), v, "a frame that is not Opus is refused");
@@ -128,9 +144,10 @@ int main(int, char**) {
     check(cut && rec.full() && rec.ms() == 120000 && rec.frames() == 6000 && kTalkMaxMs == 120000, v,
           "a burst is cut at 120 s with all of it kept");
     check(!rec.batch(batch(o->packets, 0, 1).data(), batch(o->packets, 0, 1).size()), v, "and takes nothing more");
-    auto [two, twoName] = rec.finish(0);
+    rec.end();
+    kq::Bytes two = rec.take();
     auto two_ = kq::ogg::demux(two.data(), two.size());
-    check(two_ && two_->packets.size() == 6000 && !rec.full() && rec.empty(), v, "the 120 s burst muxes whole");
+    check(two_ && two_->packets.size() == 6000, v, "the 120 s burst muxes whole");
 
     // The bar: full at key down, draining with the clock, empty at 120 s, nothing when not talking.
     TalkClock tc;

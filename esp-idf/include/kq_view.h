@@ -43,8 +43,10 @@ void kqRadioSet(const std::string& group, bool on);
 // The radio group our bursts go to while the talk key is held, or none; one of kqRadioGroups().
 std::string kqRadioTalk();
 void kqRadioSetTalk(const std::string& group);
-// A file sent to a group, as kq sendfile sends one.
-void kqSendFile(const std::string& group, const std::string& name, const std::vector<uint8_t>& bytes);
+// A burst sent to a group as it is made: started with its name, its bytes added as they come,
+// ended (with the last of them); its chunks go out as they fill. Held in memory only.
+enum class KqStream { START, DATA, END };
+void kqStream(const std::string& group, const std::string& name, KqStream step, const std::vector<uint8_t>& bytes = {});
 
 // Whether the chats can be read yet: at first start the user chooses whether a passphrase
 // protects them; with one, they stay locked after every start until it is given.

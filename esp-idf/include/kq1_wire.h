@@ -147,6 +147,8 @@ std::optional<FileUpload> file_of(const Gcm& g);
 Bytes file_content(const Bytes& membership_hash, const FileUpload& f, uint64_t version);
 std::string safe_name(const std::string& name);
 const char* filetype_of(const std::string& name);
+// Where a file's bytes are in a message of either form: the payload item's start and end.
+std::optional<std::pair<size_t, size_t>> payload_span(const Bytes& cbor);
 // A message with the file's bytes taken out, and the bytes; and the reverse.
 std::optional<std::pair<Bytes, Bytes>> take_payload(const Bytes& cbor);
 std::optional<Bytes> put_payload(const Bytes& cbor, const Bytes& payload);

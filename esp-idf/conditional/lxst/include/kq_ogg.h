@@ -23,6 +23,23 @@ std::optional<Opus> demux(const uint8_t* b, size_t n);
 // 50 packets, the last marked end of stream, granule positions counted at 48 kHz.
 Bytes mux(const Opus& o, uint32_t serial);
 
+// The same, page by page as the packets come: what start, add and finish return, in turn, is
+// what mux makes of them all.
+class Muxer {
+public:
+    Muxer(const Opus& head, uint32_t serial) : head_{head.channels, head.pre_skip, head.input_rate, {}}, serial_(serial) {}
+    Bytes start();                  // the OpusHead and OpusTags pages
+    Bytes add(const Bytes& packet); // a page, once a page is full and this packet begins the next
+    Bytes finish();                 // the last page, marked end of stream
+
+private:
+    Opus head_;
+    uint32_t serial_, seq_ = 0;
+    uint64_t granule_ = 0;
+    std::vector<Bytes> page_;
+    size_t segs_ = 0;
+};
+
 // How long one raw Opus packet plays, from its TOC byte (RFC 6716 3.1), in microseconds; 0 for
 // an empty packet or a code 3 one without its count byte.
 uint32_t packet_us(const Bytes& p);

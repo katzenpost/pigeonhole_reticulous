@@ -200,6 +200,8 @@ void Engine::Flight::forget(const ChatId& chat) {
     drop_keyed(chunks_out);
     drop_keyed(landed);
     drop_keyed(blobs);
+    drop_keyed(streams);
+    drop_keyed(stream_jobs);
 }
 
 // ---- one step's context, as engine/core.rs Cx ----
@@ -442,7 +444,7 @@ struct Engine::Cx {
     void start_write(Chat& c) {
         if (flight.writing.count(c.id) || c.write_cap.empty() || c.jobs.empty()) return;
         if (c.inducting && c.inducting->sealing) return;
-        if (c.jobs[0].upload && c.jobs[0].upload->sent < c.jobs[0].upload->total) return;
+        if (c.jobs[0].upload && (!c.jobs[0].upload->total || c.jobs[0].upload->sent < c.jobs[0].upload->total)) return;
         if (!c.jobs[0].index) {
             c.jobs[0].index = c.next_write;
             dirty(c);
@@ -483,10 +485,24 @@ struct Engine::Cx {
             if (!j.upload) continue;
             Upload& u = *j.upload;
             JobKey key{c.id, j.id};
-            if (u.sent >= u.total || flight.uploading.count(key)) continue;
             Action a(Action::SUBSTREAM);
             a.chat = c.id;
             a.job = j.id;
+            auto st = flight.streams.find(key);
+            if (!u.total && st == flight.streams.end()) {
+                // A stream that was under way before a restart: what it held is gone.
+                a.kind = Action::LOAD;
+                a.file = u.file;
+                if (flight.loading.insert(key).second) emit(a);
+                continue;
+            }
+#if KQ_STREAMS
+            if (st != flight.streams.end()) {
+                if (!flight.uploading.count(key)) stream_chunks(c, j, st->second, a);
+                continue;
+            }
+#endif
+            if (u.sent >= u.total || flight.uploading.count(key)) continue;
             if (u.write_cap.empty()) {
                 flight.uploading.insert(key);
                 emit(a);
@@ -511,11 +527,16 @@ struct Engine::Cx {
             }
             auto& out = flight.chunks_out[key];
             auto& landed = flight.landed[key];
-            for (size_t i = 0; i < want; i++) {
-                size_t n = u.sent + i;
-                bool there = out.count(n);
-                for (auto& l : landed) there |= l.first == n;
-                if (there) continue;
+            // The first boxes not yet written, a window of them: past ones that landed early, as a
+            // stream's do, so that its first and last go out together.
+            size_t picked = 0;
+            for (size_t n = u.sent; n < u.total && n - u.sent < ahead.size() && picked < want; n++) {
+                size_t i = n - u.sent;
+                bool done = false;
+                for (auto& l : landed) done |= l.first == n;
+                if (done) continue;
+                picked++;
+                if (out.count(n)) continue;
                 out.insert(n);
                 Action w(Action::WRITE_CHUNK);
                 w.chat = c.id;
@@ -528,6 +549,47 @@ struct Engine::Cx {
             }
         }
     }
+#if KQ_STREAMS
+    // A stream's chunks as they fill: every box but the first (which holds the payload's length)
+    // and the last (which holds what follows the payload), as soon as all of it is known.
+    void stream_chunks(Chat& c, Job& j, Flight::Stream& st, Action& a) {
+        Upload& u = *j.upload;
+        JobKey key{c.id, j.id};
+        if (u.write_cap.empty()) {
+            flight.uploading.insert(key);
+            emit(a);
+            return;
+        }
+        size_t size = u.box_size - 1, full = st.data.size() / size;  // boxes 0 .. full-1 are whole
+        if (full < 2) return;
+        auto& ahead = flight.ahead[key];  // box n's index is ahead[n]: nothing is counted written yet
+        if (ahead.size() < full) {
+            flight.uploading.insert(key);
+            a.kind = Action::CHUNK_INDEXES;
+            a.start = ahead.empty() ? u.next : ahead.back();
+            a.count = full - std::max<size_t>(ahead.size(), 1) + WINDOW;
+            emit(a);
+            return;
+        }
+        auto& out = flight.chunks_out[key];
+        auto& landed = flight.landed[key];
+        for (size_t n = 1; n < full && out.size() < WINDOW; n++) {
+            bool there = out.count(n);
+            for (auto& l : landed) there |= l.first == n;
+            if (there) continue;
+            out.insert(n);
+            Action w(Action::WRITE_CHUNK);
+            w.chat = c.id;
+            w.job = j.id;
+            w.n = n;
+            w.write_cap = u.write_cap;
+            w.index = ahead[n];
+            w.box = Bytes{'C'};
+            w.box.insert(w.box.end(), st.data.begin() + n * size, st.data.begin() + (n + 1) * size);
+            emit(std::move(w));
+        }
+    }
+#endif
     // Read the next box of each download.
     void start_downloads(Chat& c) {
         for (auto& d : c.downloads) {
@@ -600,7 +662,7 @@ struct Engine::Cx {
             u.sent++;
             u.next = std::move(after);
         }
-        bool done = u.sent >= u.total;
+        bool done = u.total && u.sent >= u.total;  // a stream has no total until it ends
         if (done) j->box = indirection(u.total, Bytes(u.write_cap.begin() + KEY_SIZE, u.write_cap.end()));
         dirty(c);
         if (done) {
@@ -840,7 +902,7 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
     if (!cp) return;
     Chat& c = *cp;
     if (input.kind != Input::READ && input.kind != Input::READ_CHUNK && input.kind != Input::CHUNK_INDEXES &&
-        input.kind != Input::WROTE_CHUNK)
+        input.kind != Input::WROTE_CHUNK && input.kind != Input::STREAM_DATA)
         cx.dirty(c);
     switch (input.kind) {
         case Input::CREATED: {
@@ -1013,6 +1075,61 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             cx.enqueue(c, outg, content, line, &bytes, burst);
             return;
         }
+#if KQ_STREAMS
+        case Input::STREAM_START: {
+            if (!c.group) {
+                cx.notice(c, NoticeKind::NotJoined, {});
+                return;
+            }
+            std::string safe = safe_name(input.name);
+            if (flight_.stream_jobs.count({id, safe})) return;
+            FileUpload f{{}, filetype_of(safe), safe};
+            Bytes content = file_content(c.group->membership(nullptr), f, wire_version);
+            for (auto& o : c.group->compose(content)) {
+                auto b = o.message.content == content ? box_of(o.message, wire_version) : std::nullopt;
+                if (!b) { cx.enqueue(c, {o}, std::nullopt, std::nullopt); continue; }
+                // The payload, empty when composed, is given a 5-byte length header to be filled in
+                // at the end, so that what comes after it does not move as it grows; readers take
+                // any CBOR length form.
+                Bytes cbor(b->begin() + 1, b->end());
+                auto span = payload_span(cbor);
+                if (!span) { cx.enqueue(c, {o}, std::nullopt, std::nullopt); continue; }
+                size_t start = span->first, stop = span->second;
+                Job j;
+                j.id = c.fresh();
+                j.token = o.token;
+                Upload u;
+                u.box_size = max_plaintext;
+                j.upload = u;
+                Flight::Stream st;
+                st.data.assign(cbor.begin(), cbor.begin() + start);
+                st.header = st.data.size();
+                st.data.insert(st.data.end(), {0x5a, 0, 0, 0, 0});
+                st.tail.assign(cbor.begin() + stop, cbor.end());
+                flight_.streams[{id, j.id}] = std::move(st);
+                flight_.stream_jobs[{id, safe}] = j.id;
+                c.jobs.push_back(std::move(j));
+            }
+            return;
+        }
+        case Input::STREAM_DATA:
+        case Input::STREAM_END: {
+            auto sj = flight_.stream_jobs.find({id, safe_name(input.name)});
+            if (sj == flight_.stream_jobs.end()) return;
+            JobKey key{id, sj->second};
+            auto& st = flight_.streams[key];
+            if (input.bytes) st.data.insert(st.data.end(), input.bytes->begin(), input.bytes->end());
+            if (input.kind == Input::STREAM_DATA) return;
+            size_t len = st.data.size() - st.header - 5;
+            for (int i = 0; i < 4; i++) st.data[st.header + 1 + i] = (uint8_t)(len >> (8 * (3 - i)));
+            st.data.insert(st.data.end(), st.tail.begin(), st.tail.end());
+            if (Job* j = c.job(key.second)) j->upload->total = chunk_count(st.data.size(), j->upload->box_size);
+            flight_.blobs[key] = std::move(st.data);
+            flight_.streams.erase(key);
+            flight_.stream_jobs.erase(sj);
+            return;
+        }
+#endif
         case Input::LOADED: {
             Job* j = c.job(input.job);
             if (!j) return;
@@ -1035,7 +1152,10 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
         }
         case Input::CHUNK_INDEXES: {
             Job* j = c.job(input.job);
-            if (j && j->upload && j->upload->next == input.index) {
+            auto& ahead = flight_.ahead[{id, input.job}];
+            if (j && j->upload && !ahead.empty() && ahead.back() == input.index && flight_.streams.count({id, input.job})) {
+                ahead.insert(ahead.end(), input.indexes.begin(), input.indexes.end());  // a stream's, further on
+            } else if (j && j->upload && j->upload->next == input.index) {
                 std::vector<Index> a{input.index};
                 a.insert(a.end(), input.indexes.begin(), input.indexes.end());
                 flight_.ahead[{id, input.job}] = std::move(a);
