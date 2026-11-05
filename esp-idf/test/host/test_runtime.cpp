@@ -109,6 +109,10 @@ int main(int, char**) {
     run(both, t, t + 600000);
     check(says(bob, "hello bob"), v, "bob read alice");
     check(says(alice, "hello alice"), v, "alice read bob");
+    auto seen = kq::chats(alice.rt.eng.state, "g", false);
+    check(seen.size() == 1 && seen[0].lines.empty() && !seen[0].last.text.empty() && seen[0].last.time > 0 &&
+              seen[0].last.time <= (int64_t)(t / 1000),
+          v, "the list has the latest message and its time without the lines");
     // carol writes wire version 3 (s.kq.wire_version on a device): her voucher is the long form,
     // the one a founder on hpqc v0.0.95 reads.
     Peer carol("carol", rep);

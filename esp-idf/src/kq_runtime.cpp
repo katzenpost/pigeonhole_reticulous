@@ -158,27 +158,30 @@ std::vector<KqChat> chats(const kq1::State& st, const std::string& only, bool li
         if (c.joining) k.voucher = c.joining->code.empty() ? "\xE2\x80\xA6" : c.joining->code;
         k.members = c.group ? (unsigned)c.group->readers.size() : 0;
         k.pending = (unsigned)c.jobs.size();
-        if (lines) {
-            for (auto& l : c.log) {
-                KqLine x;
-                if (l.notice) {
-                    x.notice = true;
-                    // The shared wording names the file katzenrns keeps the code in; there is none here.
-                    x.text = l.notice->kind == kq1::NoticeKind::VoucherMinted
-                                 ? "give the voucher code to a member of the group"
-                                 : kq1::plain(*l.notice);
-                } else {
-                    x.mine = c.group && c.group->me() == l.sender;
-                    const std::string* n = c.names.get(l.sender);
-                    x.who = x.mine ? "me" : n ? *n : "?";
-                    x.text = l.text;
-                    if (x.mine)
-                        x.mark = l.status == kq1::Status::Pending ? KqLine::PENDING
-                               : c.acknowledged(l) ? KqLine::READ : KqLine::WRITTEN;
-                }
-                k.lines.push_back(std::move(x));
+        auto line = [&](const kq1::Line& l) {
+            KqLine x;
+            x.time = l.time;
+            if (l.notice) {
+                x.notice = true;
+                // The shared wording names the file katzenrns keeps the code in; there is none here.
+                x.text = l.notice->kind == kq1::NoticeKind::VoucherMinted
+                             ? "give the voucher code to a member of the group"
+                             : kq1::plain(*l.notice);
+            } else {
+                x.mine = c.group && c.group->me() == l.sender;
+                const std::string* n = c.names.get(l.sender);
+                x.who = x.mine ? "me" : n ? *n : "?";
+                x.text = l.text;
+                if (x.mine)
+                    x.mark = l.status == kq1::Status::Pending ? KqLine::PENDING
+                           : c.acknowledged(l) ? KqLine::READ : KqLine::WRITTEN;
             }
-        }
+            return x;
+        };
+        for (auto it = c.log.rbegin(); it != c.log.rend(); ++it)
+            if (!it->notice) { k.last = line(*it); break; }
+        if (lines)
+            for (auto& l : c.log) k.lines.push_back(line(l));
         out.push_back(std::move(k));
     }
     return out;
