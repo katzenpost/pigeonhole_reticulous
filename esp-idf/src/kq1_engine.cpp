@@ -496,10 +496,12 @@ struct Engine::Cx {
                 if (flight.loading.insert(key).second) emit(a);
                 continue;
             }
+#if KQ_STREAMS
             if (st != flight.streams.end()) {
                 if (!flight.uploading.count(key)) stream_chunks(c, j, st->second, a);
                 continue;
             }
+#endif
             if (u.sent >= u.total || flight.uploading.count(key)) continue;
             if (u.write_cap.empty()) {
                 flight.uploading.insert(key);
@@ -547,6 +549,7 @@ struct Engine::Cx {
             }
         }
     }
+#if KQ_STREAMS
     // A stream's chunks as they fill: every box but the first (which holds the payload's length)
     // and the last (which holds what follows the payload), as soon as all of it is known.
     void stream_chunks(Chat& c, Job& j, Flight::Stream& st, Action& a) {
@@ -586,6 +589,7 @@ struct Engine::Cx {
             emit(std::move(w));
         }
     }
+#endif
     // Read the next box of each download.
     void start_downloads(Chat& c) {
         for (auto& d : c.downloads) {
@@ -1071,6 +1075,7 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             cx.enqueue(c, outg, content, line, &bytes, burst);
             return;
         }
+#if KQ_STREAMS
         case Input::STREAM_START: {
             if (!c.group) {
                 cx.notice(c, NoticeKind::NotJoined, {});
@@ -1124,6 +1129,7 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             flight_.stream_jobs.erase(sj);
             return;
         }
+#endif
         case Input::LOADED: {
             Job* j = c.job(input.job);
             if (!j) return;

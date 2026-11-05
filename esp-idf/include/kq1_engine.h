@@ -11,6 +11,15 @@
 
 #include "kq1_member.h"
 
+// Streams, bursts sent as they are made, are built only where something sends them: voice images,
+// the Linux image's kq stream, and the host tests. The default T-Deck image goes without.
+#if defined(ESP_PLATFORM)
+#include "sdkconfig.h"
+#endif
+#if !defined(ESP_PLATFORM) || CONFIG_STRADDLE_LXST || CONFIG_IDF_TARGET_LINUX
+#define KQ_STREAMS 1
+#endif
+
 namespace kq1 {
 
 using ChatId = std::string;
