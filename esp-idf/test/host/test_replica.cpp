@@ -6,6 +6,7 @@
 #include <sodium.h>
 
 #include "fake_replica.h"
+#include "kq_probe.h"
 #include "vectors.h"
 
 using namespace kq;
@@ -70,5 +71,21 @@ int main(int, char**) {
     c.ready(0);
     deliver();
     check(reads.back().kind == ReadOutcome::FOUND, v, "works again once up");
+
+    // kq probe: each request answered 10 ms after it went out.
+    uint32_t t = 0;
+    Probe probe(c, [&] { return t; }, [](uint8_t* p, size_t n) { randombytes_buf(p, n); });
+    std::string summary;
+    check(probe.start(3, [&](const std::string& s) { summary = s; }) && !probe.start(1), v, "one probe at a time");
+    for (int i = 0; i < 20 && probe.running(); i++) { t += 10; deliver(); }
+    check(!probe.running() && probe.write.ms == std::vector<uint32_t>(3, 10) && probe.hit.ms == probe.write.ms &&
+              probe.miss.ms == probe.write.ms, v, "three rounds of write, hit and miss, each timed");
+    check(summary == "write 3: median 10 ms, min 10, max 10; hit 3: median 10 ms, min 10, max 10; "
+                     "miss 3: median 10 ms, min 10, max 10", v, "summary");
+    rep.answer = false;
+    probe.start(1);
+    c.tick(t + ReplicaClient::kTimeoutMs);
+    check(!probe.running() && probe.write.failed == 1 && probe.status() == "write 0, 1 failed; hit 0; miss 0", v,
+          "an unanswered write fails its round");
     return finish("replica");
 }
