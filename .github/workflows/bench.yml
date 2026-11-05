@@ -1,41 +1,11 @@
-# The benchmarks of esp-idf/test/bench, only when code whose speed they measure changes on
-# main, or when asked for (Actions → benchmarks → Run workflow). The tables land on the run's
+# The benchmarks of esp-idf/test/bench, only when asked for (Actions → benchmarks → Run workflow). The tables land on the run's
 # summary page and as an artifact. A shared runner's times are noisy and are not a device's:
 # read the order, and the gaps between operations.
 name: benchmarks
 
 on:
+  # Manual only: benchmarks run locally during performance work, not on every push (CI minutes).
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'esp-idf/components/**'
-      - 'esp-idf/include/**'
-      - 'esp-idf/src/kq_crypto.cpp'
-      - 'esp-idf/src/kq_nike.cpp'
-      - 'esp-idf/src/kq_bacap.cpp'
-      - 'esp-idf/src/kq_wire.cpp'
-      - 'esp-idf/src/kq1_wire.cpp'
-      - 'esp-idf/src/kq1_voucher.cpp'
-      - 'esp-idf/src/kq_replica.cpp'
-      - 'esp-idf/src/kq_store.cpp'
-      - 'esp-idf/src/kq_vault.cpp'
-      - 'esp-idf/src/kq_json.cpp'
-      - 'esp-idf/src/kq1_trace.cpp'
-      - 'esp-idf/test/bench/**'
-      - 'esp-idf/test/kq.mk'
-      - '.github/workflows/bench.yml'
-
-permissions:
-  contents: read
-
-concurrency:
-  group: bench-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  MBEDTLS_VERSION: 3.6.7
-  MBEDTLS_SHA256: a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
 
 jobs:
   bench:
