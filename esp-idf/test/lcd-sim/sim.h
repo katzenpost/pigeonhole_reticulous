@@ -5,3 +5,5 @@ std::string simSaved();
 // The talk key held (or let go), as lxst would report it; the sim records and sends nothing.
 void simTalk(bool down);
 bool simChannelUp();
+// A recording (16 kHz mono WAV) played to the microphone while Add member listens.
+void simListen(const std::string& wav);

@@ -9,8 +9,10 @@
 #include <string>
 #include <vector>
 
+#include "sdkconfig.h"
 #include "lcd.h"
 #include "lcd_input_box.h"
+#include "kq1_engine.h"
 #include "kq_qr.h"
 #include "kq_view.h"
 
@@ -241,7 +243,11 @@ uint32_t g_seen = 0;         // the engine generation last drawn
 lv_timer_t* g_timer = nullptr;
 
 lv_obj_t *s_list = nullptr, *s_listBody = nullptr, *s_chatScr = nullptr, *s_log = nullptr, *s_compose = nullptr,
-         *s_voucher = nullptr, *s_dialog = nullptr, *s_dialogField = nullptr;
+         *s_voucher = nullptr, *s_dialog = nullptr, *s_dialogField = nullptr, *s_dialogNote = nullptr,
+         *s_dialogOk = nullptr;
+bool g_listening = false;    // the dialog listens for a voucher code by sound
+std::string g_soundShown;    // what of kqSound() was last drawn
+bool g_sendingShown = false;
 Header g_listHdr, g_chatHdr;
 
 std::string statusOf(const KqChat& c) {
@@ -263,7 +269,11 @@ void (*g_dialogOk)(const std::string&) = nullptr;
 void closeDialog() {
     if (!s_dialog) return;
     lv_obj_t* o = s_dialog;
-    s_dialog = s_dialogField = nullptr;
+    s_dialog = s_dialogField = s_dialogNote = s_dialogOk = nullptr;
+#if CONFIG_STRADDLE_AUDIO
+    if (g_listening) kqSoundStop();
+#endif
+    g_listening = false;
     lcdModalUntrack(o);
     lv_obj_delete(o);
     // The release of the key that closed it lands on whatever has focus now, so not on
@@ -284,8 +294,10 @@ void dialogSubmit(lv_event_t*) {
     closeDialog();
 }
 
+void onListen(lv_event_t*);
+
 void showDialog(const std::string& title, const std::string& hint, const char* placeholder, const char* verb,
-                void (*ok)(const std::string&)) {
+                void (*ok)(const std::string&), bool listen = false) {
     closeDialog();
     g_dialogOk = ok;
     s_dialog = lv_obj_create(s_layer);
@@ -314,11 +326,16 @@ void showDialog(const std::string& title, const std::string& hint, const char* p
     s_dialogField = mkPlainField(box, placeholder);
     lv_obj_set_width(s_dialogField, lv_pct(100));
     lv_obj_add_event_cb(s_dialogField, dialogSubmit, LV_EVENT_READY, nullptr);
+    if (listen) {
+        s_dialogNote = mkWrap(box, "", C_SUB, kSmall);
+        lv_obj_add_flag(s_dialogNote, LV_OBJ_FLAG_HIDDEN);
+    }
 
     lv_obj_t* btns = mkRowBox(box, lcdPx(8));
     lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    if (listen) mkButton(btns, "Listen", false, onListen);
     mkButton(btns, "Cancel", false, [](lv_event_t*) { lcdKeyboardClose(); closeDialog(); });
-    mkButton(btns, verb, true, dialogSubmit);
+    s_dialogOk = mkButton(btns, verb, true, dialogSubmit);
 
     lcdModalTrack(s_dialog, [](void*) { closeDialog(); });
     if (lcdKeyboardOnScreen()) lcdKeyboardOpen(s_dialogField);
@@ -442,9 +459,19 @@ void drawVoucher(const KqChat& c) {
     lv_obj_set_flex_grow(col, 1);
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(col, lcdPx(4), 0);
+#if CONFIG_STRADDLE_AUDIO
+    mkWrap(col, "Your voucher code: a member of the group scans it, types it into Add member, or hears it.",
+           C_AMBER, kSmall);
+    mkWrap(col, c.voucher, 0xFFFFFF, kBig);
+    lv_obj_t* sr = mkRowBox(col, lcdPx(6));
+    lv_obj_t* b = mkButton(sr, g_sendingShown ? "Sending\xE2\x80\xA6" : "Send by sound", false, nullptr);
+    bindString(b, [](lv_event_t* e) { kqSoundSend(boundString(e)); }, c.voucher);
+    mkLabel(sr, "check " + kq1::voucher_check(c.voucher), C_AMBER, kBold);
+#else
     mkWrap(col, "Your voucher code: a member of the group scans it or types it into Add member.", C_AMBER,
            kSmall);
     mkWrap(col, c.voucher, 0xFFFFFF, kBig);
+#endif
 }
 
 void drawChat(bool force) {
@@ -490,9 +517,58 @@ void onSend(lv_event_t*) {
 
 void onAddMember(lv_event_t*) {
     if (g_chat.empty()) return;
+#if CONFIG_STRADDLE_AUDIO
+    showDialog("Add a member",
+               "Type the voucher code they were given when they chose Join, or choose Listen while their device "
+               "sends it by sound.",
+               "voucher code", "Add", [](const std::string& code) { kqCommand("invite", g_chat, code); }, true);
+#else
     showDialog("Add a member", "Type the voucher code they were given when they chose Join.", "voucher code", "Add",
                [](const std::string& code) { kqCommand("invite", g_chat, code); });
+#endif
 }
+
+#if CONFIG_STRADDLE_AUDIO
+void onListen(lv_event_t*) {
+    g_listening = true;
+    g_soundShown.clear();
+    kqSoundListen();
+}
+
+// What the sound is doing, where it shows: the Add member dialog while it listens, and the
+// voucher's Send by sound button while it plays.
+void drawSound() {
+    KqSound s = kqSound();
+    bool sending = s.state == KqSound::SENDING;
+    if (sending != g_sendingShown) {
+        g_sendingShown = sending;
+        if (g_screen == SC_CHAT) drawChat(false);
+    }
+    std::string key = std::to_string(s.state) + s.code + std::to_string(s.left_ms / 1000);
+    if (!s_dialogNote || !g_listening || key == g_soundShown) return;
+    g_soundShown = key;
+    std::string t;
+    uint32_t color = C_SUB;
+    if (s.state == KqSound::LISTENING) {
+        t = "Listening\xE2\x80\xA6 " + std::to_string((s.left_ms + 999) / 1000) +
+            " s. Hold this device 10\xE2\x80\x93" "30 cm from theirs while they choose Send by sound.";
+    } else if (s.state == KqSound::HEARD) {
+        lv_textarea_set_text(s_dialogField, s.code.c_str());
+        t = "Heard a voucher code, check " + kq1::voucher_check(s.code) + ". If their screen shows the same, choose Add.";
+        color = C_OK;
+        deferFocus(s_dialogOk);
+    } else if (s.state == KqSound::FAILED) {
+        t = "Not heard: " + s.why + ". Hold the devices closer and choose Listen again.";
+        color = C_AMBER;
+    }
+    lv_label_set_text(s_dialogNote, t.c_str());
+    lv_obj_set_style_text_color(s_dialogNote, lv_color_hex(color), 0);
+    if (t.empty()) lv_obj_add_flag(s_dialogNote, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(s_dialogNote, LV_OBJ_FLAG_HIDDEN);
+}
+#else
+void onListen(lv_event_t*) {}
+#endif
 
 void chatBack(lv_event_t*) { showScreen(SC_LIST); }
 
@@ -677,6 +753,9 @@ void refreshTimerCb(lv_timer_t*) {
         return;
     }
     if (g_screen == SC_LOCK) { showScreen(SC_LIST); return; }
+#if CONFIG_STRADDLE_AUDIO
+    drawSound();
+#endif
     uint32_t g = kqGeneration();
     if (g == g_seen) return;
     g_seen = g;
@@ -719,7 +798,13 @@ void KqApp::onHide() {
 
 void KqApp::onClose() {
     if (g_timer) { lv_timer_delete(g_timer); g_timer = nullptr; }
+#if CONFIG_STRADDLE_AUDIO
+    if (g_listening) kqSoundStop();
+#endif
     s_layer = s_list = s_listBody = s_chatScr = s_log = s_compose = s_voucher = s_dialog = s_dialogField = nullptr;
+    s_dialogNote = s_dialogOk = nullptr;
+    g_listening = g_sendingShown = false;
+    g_soundShown.clear();
     s_lockScr = s_lockBody = s_pass = s_pass2 = s_lockErr = nullptr;
     g_lockShown = KqLock::OPEN;
     g_listHdr = Header{};

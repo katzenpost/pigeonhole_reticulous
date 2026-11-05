@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "kq1_engine.h"
 
+#include <cstdio>
 #include <cstring>
 
 #include <sodium.h>
+
+#include "kq_nike.h"
 
 namespace kq1 {
 
@@ -61,7 +64,7 @@ std::string voucher_code(const Bytes& v) {
 }
 
 // Whitespace is skipped: hushphone shows a code in groups of eight.
-static std::optional<Bytes> from_code(const std::string& code) {
+std::optional<Bytes> from_code(const std::string& code) {
     Bytes b(code.size());
     size_t n = 0;
     const char* end = nullptr;
@@ -71,6 +74,16 @@ static std::optional<Bytes> from_code(const std::string& code) {
         return std::nullopt;
     b.resize(n);
     return b;
+}
+
+std::string voucher_check(const std::string& code) {
+    auto v = from_code(code);
+    if (!v) return "";
+    uint8_t d[4];
+    kq::nike::Shake(v->data(), v->size())(d, sizeof d);
+    char s[8];
+    snprintf(s, sizeof s, "%04u", (unsigned)(((uint32_t)d[0] << 24 | d[1] << 16 | d[2] << 8 | d[3]) % 10000));
+    return s;
 }
 
 std::string sanitize(const std::string& name) {
