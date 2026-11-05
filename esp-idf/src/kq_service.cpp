@@ -419,16 +419,40 @@ void kqRadioSet(const std::string& group, bool on) {
     std::string all;
     for (auto& g : gs) all += (all.empty() ? "" : ",") + g;
     storageSet("s.kq.radio", all.c_str());
+    if (!on && kqRadioTalk() == group) kqRadioSetTalk("");
     applyRadio();
+}
+
+std::string kqRadioTalk() { return storageGetStr("s.kq.radio.talk", ""); }
+
+void kqRadioSetTalk(const std::string& group) {
+    if (!group.empty()) kqRadioSet(group, true);
+    storageSet("s.kq.radio.talk", group.c_str());
+}
+
+// From any task: the engine takes the file under its lock, and the kq task hands out what follows.
+void kqSendFile(const std::string& group, const std::string& name, const std::vector<uint8_t>& bytes) {
+    if (!s_store) return;
+    kq1::Input in(kq1::Input::SEND_FILE);
+    in.chat = group;
+    in.name = name;
+    in.bytes = bytes;
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    s_rt->input(nowS(), nowMs(), in);
+    xSemaphoreGive(s_mu);
+    wake();
 }
 
 static void cliRadio(const std::string& how, const std::string& group) {
     if ((how == "on" || how == "off") && !group.empty()) kqRadioSet(group, how == "on");
-    else if (!how.empty()) { cliPrintf("kq radio [on <g> | off <g>]\n"); return; }
+    else if (how == "talk") kqRadioSetTalk(group);
+    else if (!how.empty()) { cliPrintf("kq radio [on <g> | off <g> | talk [<g>]]\n"); return; }
     std::string gs;
     for (auto& g : kqRadioGroups()) gs += (gs.empty() ? "" : ", ") + g;
     KqRadio r = kqRadio();
-    cliPrintf("radio groups: %s\n", gs.empty() ? "none" : gs.c_str());
+    std::string talk = kqRadioTalk();
+    cliPrintf("radio groups: %s; talking to: %s%s\n", gs.empty() ? "none" : gs.c_str(), talk.empty() ? "none" : talk.c_str(),
+              r.talking ? " (talk key held)" : "");
     cliPrintf("playing: %s; queued %u, heard %u, missed %u\n", r.playing.empty() ? "-" : r.playing.c_str(), r.queued,
               r.heard, r.missed);
     if (!r.last.empty()) cliPrintf("last: %s\n", r.last.c_str());
@@ -643,7 +667,7 @@ static void cliBench(const std::string& what) {
 }
 
 #if CONFIG_STRADDLE_LXST
-#define KQ_RADIO_USAGE " | radio [on <g> | off <g>]"
+#define KQ_RADIO_USAGE " | radio [on <g> | off <g> | talk [<g>]]"
 #else
 #define KQ_RADIO_USAGE ""
 #endif

@@ -4,6 +4,9 @@
 #include <fstream>
 #include <iterator>
 
+#include <sodium.h>
+
+#include "kq1_wire.h"
 #include "kq_ogg.h"
 #include "kq_radio_feed.h"
 #include "vectors.h"
@@ -91,5 +94,58 @@ int main(int, char**) {
     check(out == 250 && !ended, v, "then a second's worth a second later");
     take(20000);
     check(out == 600 && ended && ordered && f.duration_ms() == 12000, v, "the rest, in order, then the talk end");
+
+    // Our own burst: lxst's batches (codec byte first) recorded, then muxed and named.
+    Recorder rec;
+    auto batch = [](const std::vector<kq::Bytes>& ps, size_t from, size_t n) {
+        kq::Bytes m{kEvBatch, (uint8_t)n};
+        for (size_t i = from; i < from + n; i++) {
+            m.push_back((uint8_t)(ps[i].size() + 1));
+            m.push_back(0);
+            m.push_back(kCodecOpus);
+            m.insert(m.end(), ps[i].begin(), ps[i].end());
+        }
+        return m;
+    };
+    bool all = true;
+    for (size_t i = 0; i < 50; i += 10) all &= rec.batch(batch(o->packets, i, 10).data(), batch(o->packets, i, 10).size());
+    check(all && rec.frames() == 50 && rec.ms() == 1000, v, "a second of batches recorded");
+    auto [burst, name] = rec.finish(5);
+    auto back = kq::ogg::demux(burst.data(), burst.size());
+    check(back && back->packets == o->packets && back->input_rate == 16000 && back->pre_skip == 312 && rec.empty(), v,
+          "the burst demuxes to what was recorded");
+    uint8_t h[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(h, burst.data(), burst.size());
+    check(name == tohex(kq::Bytes(h, h + sizeof h)) + ".opus" && kq1::filetype_of(name) == std::string("audio/opus"), v,
+          "named as hushphone names a clip");
+    kq::Bytes raw = batch(o->packets, 0, 1);
+    raw[4] = 0;  // codec byte RAW
+    check(!rec.batch(raw.data(), raw.size()), v, "a frame that is not Opus is refused");
+    // The captain's cap: a burst holds 120 s; what comes after is refused, what fit is kept.
+    bool cut = false;
+    for (int k = 0; k < 121 && !cut; k++)
+        for (size_t i = 0; i < 50 && !cut; i += 10) cut = !rec.batch(batch(o->packets, i, 10).data(), batch(o->packets, i, 10).size());
+    check(cut && rec.full() && rec.ms() == 120000 && rec.frames() == 6000 && kTalkMaxMs == 120000, v,
+          "a burst is cut at 120 s with all of it kept");
+    check(!rec.batch(batch(o->packets, 0, 1).data(), batch(o->packets, 0, 1).size()), v, "and takes nothing more");
+    auto [two, twoName] = rec.finish(0);
+    auto two_ = kq::ogg::demux(two.data(), two.size());
+    check(two_ && two_->packets.size() == 6000 && !rec.full() && rec.empty(), v, "the 120 s burst muxes whole");
+
+    // The bar: full at key down, draining with the clock, empty at 120 s, nothing when not talking.
+    TalkClock tc;
+    check(tc.left_ms(5) == 0 && !tc.expired(5), v, "no time left to show when not talking");
+    tc.start(1000);
+    check(tc.left_ms(1000) == 120000 && tc.left_ms(31000) == 90000 && tc.left_ms(1250) == 119750, v,
+          "the time left, to the quarter second");
+    check(!tc.expired(120999) && tc.expired(121000) && tc.left_ms(500000) == 0, v, "expired at 120 s");
+    tc.start(0xFFFFFF00u);
+    check(tc.left_ms(0x00000100u) == 120000 - 0x200, v, "across the millisecond clock's wrap");
+    tc.stop();
+    check(tc.left_ms(0x00000100u) == 0, v, "stopped");
+    if (const char* out = getenv("KQ_OGG_OUT")) {
+        FILE* f = fopen(out, "wb");
+        if (f) { fwrite(burst.data(), 1, burst.size(), f); fclose(f); }
+    }
     return finish("ogg");
 }
