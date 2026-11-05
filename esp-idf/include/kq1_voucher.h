@@ -44,7 +44,8 @@ std::optional<Inducted> induct(const uint8_t voucher[32], const Bytes& payload, 
 struct Opened {
     Bytes who_reply, salt, mutated_write_cap;
 };
-// public_key is the seal key minted beside secret_key; deriving it would cost a CTIDH action.
+// public_key is the seal key minted beside secret_key, or empty: the compact form then derives it, a
+// second CTIDH action beside the shared secret's (kq::nike::both).
 std::optional<Opened> open_reply(const Bytes& secret_key, const Bytes& public_key, const Bytes& sealed,
                                  const Bytes& message_write_cap);
 
