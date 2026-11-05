@@ -58,6 +58,7 @@ static std::string hexOf(const uint8_t* p, size_t n) {
 }
 
 static TaskHandle_t s_task = nullptr;
+void kqRadioHear(kq1::Clip&& c);  // the voice slice's, or the weak one below
 static kq::ReplicaClient* s_client = nullptr;
 static unsigned s_sent = 0, s_sendFail = 0, s_recv = 0;
 static kq::Probe* s_probe = nullptr;
