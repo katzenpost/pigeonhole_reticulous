@@ -74,6 +74,15 @@
     mula.dd.hl.ldinc m1, a3, m1, m3     // q_2w+1 p_2(k-w); m1 = Q_(w+1)
     .endm
 
+// One step of an odd column 2k+1 scanned downwards, X down and Y up: m0 = Q_w, m1 = A_w,
+// m2 = P_(k-w) on entry; m3 is loaded.
+    .macro  ODD_STEP_DOWN
+    mula.dd.lh.ldinc m3, a4, m0, m2     // q_2w p_2(k-w)+1; m3 = B_(k-w)
+    mula.dd.hl.ldinc m2, a4, m0, m2     // q_2w+1 p_2(k-w); m2 = P_(k-w+1)
+    mula.dd.lh.lddec m0, a3, m1, m3     // a_2w b_2(k-w)+1; m0 = Q_(w-1)
+    mula.dd.hl.lddec m1, a3, m1, m3     // a_2w+1 b_2(k-w); m1 = A_(w-1)
+    .endm
+
 // ACC = ACC >> 16 (arithmetic), with SAR = 16; a12 = ACCLO already for SHIFT_LO.
     .macro  SHIFT_LO
     rsr.acchi a13
@@ -183,17 +192,18 @@ fiat_p1024_square:
     .align  4
     .type   fp1024_scan, @function
 fp1024_scan:
-    s32i    a14, a1, 0          // Y[-2], Y[-1], Y[64], Y[65]
+    s32i    a14, a1, 0          // Y[-2], Y[-1], Y[64], Y[65], X[64], X[65]
     s32i    a14, a1, 4
     s32i    a14, a1, 264
     s32i    a14, a1, 268
+    s32i    a14, a1, 528
+    s32i    a14, a1, 532
     ssai    16
     wsr.acclo a14
     wsr.acchi a14
     addmi   a5, a1, 256
     addi    a5, a5, 12          // &X[0] - 4, the X pointer's start
     addi    a6, a1, 16          // &Y[2k + 2], the Y pointer's start
-    addi    a8, a5, 8           // &X[2k + 1], where q_2k and q_2k+1 go
     addi    a14, a5, 4          // a6 at k = 32
     movi    a7, 1               // k + 1 steps
     movi    a9, 0x8025          // -p^-1 mod 2^16
@@ -213,7 +223,7 @@ fp1024_scan:
 1:
     rsr.acclo a11
     mull    a11, a11, a9
-    s16i    a11, a8, 0
+    s16i    a11, a6, 260        // q_2k into X[2k + 1], at a6 + 260
     mula.aa.ll a11, a10
     SHIFT
     mov     a3, a5
@@ -226,15 +236,15 @@ fp1024_scan:
 1:
     rsr.acclo a11
     mull    a11, a11, a9
-    s16i    a11, a8, 2
+    s16i    a11, a6, 262
     mula.aa.ll a11, a10
     SHIFT
     addi    a6, a6, 8
     addi    a7, a7, 1
-    addi    a8, a8, 8
     bne     a6, a14, .Llow
     // Columns 2k and 2k+1 for k = 32..63: steps w = k-32..31 (the first one meets the zero at
-    // v = 32) and w = k-31..31; each column's low 16 bits are the output's digit 2k-64 or 2k-63.
+    // v = 32), then w = 32 down to k-31, from where the even scan stopped (w = 32 meets the zeros
+    // in X[64], X[65]); each column's low 16 bits are the output's digit 2k-64 or 2k-63.
     mov     a8, a2
     movi    a7, 32              // 64 - k steps
 .Lhigh:
@@ -250,19 +260,14 @@ fp1024_scan:
     rsr.acclo a12
     s16i    a12, a8, 0
     SHIFT_LO
-    addi    a3, a5, 8
-    addi    a4, a6, -8
-    addi    a11, a7, -1
-    ldinc   m0, a3
-    ldinc   m1, a3
-    lddec   m2, a4
-    loopgtz a11, 1f
-    ODD_STEP
+    addi    a3, a3, -4
+    addi    a5, a5, 8           // the next column's X start; here it also aligns the loop
+    loop    a7, 1f
+    ODD_STEP_DOWN
 1:
     rsr.acclo a12
     s16i    a12, a8, 2
     SHIFT_LO
-    addi    a5, a5, 8
     addi    a8, a8, 4
     addi    a7, a7, -1
     bnez    a7, .Lhigh
