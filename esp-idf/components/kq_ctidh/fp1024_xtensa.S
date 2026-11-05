@@ -5,7 +5,12 @@
 // Windowed ABI; the output may alias an input.
 //
 // Constant time: fixed trip counts, fixed addresses, and no branch on data. Carries and
-// borrows are computed with logic and MINU (this core has no SALTU).
+// borrows are computed with logic and MINU (this core has no SALTU). The only multipliers used
+// are MAC16 and MUL16U, both 16x16.
+//
+// The MAC16 load-and-multiply forms here often load into one of their own sources, which the
+// ISA defines (the sources are read first). Espressif's QEMU 9.2.2 gets that wrong across
+// instructions of one translation block; test this code there with -accel tcg,one-insn-per-tb=on.
 //
 // Multiply: Montgomery multiplication by product scanning (FIPS: Koc, Acar, Kaliski 1996) over
 // 16-bit digits on MAC16, which multiplies signed 16-bit halves into a 40-bit accumulator and can
@@ -222,7 +227,7 @@ fp1024_scan:
     EVEN_STEP
 1:
     rsr.acclo a11
-    mull    a11, a11, a9
+    mul16u  a11, a11, a9
     s16i    a11, a6, 260        // q_2k into X[2k + 1], at a6 + 260
     mula.aa.ll a11, a10
     SHIFT
@@ -235,7 +240,7 @@ fp1024_scan:
     ODD_STEP
 1:
     rsr.acclo a11
-    mull    a11, a11, a9
+    mul16u  a11, a11, a9
     s16i    a11, a6, 262
     mula.aa.ll a11, a10
     SHIFT
