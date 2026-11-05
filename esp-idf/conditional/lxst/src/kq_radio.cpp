@@ -202,9 +202,7 @@ void kqRadioHear(kq1::Clip&& c) {
 
 KqRadio kqRadio() {
     Lock g;
-    KqRadio r = s_st;
-    r.voice = true;
-    return r;
+    return s_st;
 }
 
 void KqRadioService::onInit() {

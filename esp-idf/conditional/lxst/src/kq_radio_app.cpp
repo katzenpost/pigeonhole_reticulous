@@ -82,6 +82,11 @@ void drawList() {
 
 void refresh(lv_timer_t*) {
     if (!s_root) return;
+    if (kqLock() != KqLock::OPEN) {
+        lv_label_set_text(s_status, "The chats are locked: open Group Chat to unlock them");
+        lv_obj_set_style_text_color(s_status, lv_color_hex(C_AMBER), 0);
+        return;
+    }
     KqRadio r = kqRadio();
     size_t on = kqRadioGroups().size();
     std::string st = !r.playing.empty() ? LV_SYMBOL_VOLUME_MAX " " + r.playing

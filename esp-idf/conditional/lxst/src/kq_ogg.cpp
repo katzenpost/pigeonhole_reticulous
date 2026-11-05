@@ -65,7 +65,7 @@ static void page(Bytes& out, uint8_t type, uint64_t granule, uint32_t serial, ui
     size_t at = out.size();
     out.insert(out.end(), {'O', 'g', 'g', 'S', 0, type});
     for (int i = 0; i < 8; i++) out.push_back((uint8_t)(granule >> (8 * i)));
-    for (uint32_t v : {serial, seq, 0u})
+    for (uint32_t v : {serial, seq, (uint32_t)0})
         for (int i = 0; i < 4; i++) out.push_back((uint8_t)(v >> (8 * i)));
     Bytes lacing;
     for (auto* p : packets) {

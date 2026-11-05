@@ -14,6 +14,7 @@
 #include <string>
 
 #include "esp_random.h"
+#include "sdkconfig.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -58,7 +59,9 @@ static std::string hexOf(const uint8_t* p, size_t n) {
 }
 
 static TaskHandle_t s_task = nullptr;
-void kqRadioHear(kq1::Clip&& c);  // the voice slice's, or the weak one below
+#if CONFIG_STRADDLE_LXST
+void kqRadioHear(kq1::Clip&& c);  // the voice slice's (conditional/lxst/)
+#endif
 static kq::ReplicaClient* s_client = nullptr;
 static unsigned s_sent = 0, s_sendFail = 0, s_recv = 0;
 static kq::Probe* s_probe = nullptr;
@@ -348,7 +351,9 @@ static void loadChats() {
     std::vector<std::string> problems;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_rt->eng.state = s_store->load(storageGetStr("s.kq.name", "kq"), &problems);
+#if CONFIG_STRADDLE_LXST
     s_rt->on_clip = [](kq1::Clip&& c) { kqRadioHear(std::move(c)); };
+#endif
     s_rt->on_file = [](const kq1::FileWrite& f) {
         if (!s_vault->files().replace(f.file, std::string(f.bytes.begin(), f.bytes.end())))
             err("kq: keeping %s failed", f.file.c_str());
@@ -384,11 +389,10 @@ KqLock kqLock(std::string* why) {
 void kqSetup(const std::string& passphrase) { if (s_vault) { s_vault->ask_setup(passphrase); wake(); } }
 void kqUnlock(const std::string& passphrase) { if (s_vault) { s_vault->ask_unlock(passphrase); wake(); } }
 
-// ---- the radio: the groups in s.kq.radio, comma-separated; playing is the voice slice's ----
+// ---- the radio, in voice builds only: the groups in s.kq.radio, comma-separated; playing is
+// the voice slice's ----
 
-// Without the voice slice (conditional/lxst/) bursts are dropped unheard.
-__attribute__((weak)) void kqRadioHear(kq1::Clip&&) {}
-__attribute__((weak)) KqRadio kqRadio() { return {}; }
+#if CONFIG_STRADDLE_LXST
 
 std::vector<std::string> kqRadioGroups() {
     std::vector<std::string> out;
@@ -424,12 +428,12 @@ static void cliRadio(const std::string& how, const std::string& group) {
     std::string gs;
     for (auto& g : kqRadioGroups()) gs += (gs.empty() ? "" : ", ") + g;
     KqRadio r = kqRadio();
-    cliPrintf("radio groups: %s%s\n", gs.empty() ? "none" : gs.c_str(), r.voice ? "" : " (no voice in this image)");
-    if (!r.voice) return;
+    cliPrintf("radio groups: %s\n", gs.empty() ? "none" : gs.c_str());
     cliPrintf("playing: %s; queued %u, heard %u, missed %u\n", r.playing.empty() ? "-" : r.playing.c_str(), r.queued,
               r.heard, r.missed);
     if (!r.last.empty()) cliPrintf("last: %s\n", r.last.c_str());
 }
+#endif
 
 void kqCommand(const char* verb, const std::string& group, const std::string& arg) {
     std::string v = arg.empty() ? group : group + "|" + arg;
@@ -638,6 +642,12 @@ static void cliBench(const std::string& what) {
               what.c_str());
 }
 
+#if CONFIG_STRADDLE_LXST
+#define KQ_RADIO_USAGE " | radio [on <g> | off <g>]"
+#else
+#define KQ_RADIO_USAGE ""
+#endif
+
 static void cliKq(const char* args) {
     std::string a = args ? args : "";
     if (a.compare(0, 6, "bench ") == 0 || a == "bench") { cliBench(a.size() > 6 ? a.substr(6) : ""); return; }
@@ -681,12 +691,14 @@ static void cliKq(const char* args) {
         kqCommand(verb == "sendfile" ? "file" : verb.c_str(), group, arg);
         return;
     }
+#if CONFIG_STRADDLE_LXST
     if (verb == "radio") { cliRadio(group, arg); return; }
+#endif
     if (verb == "groups") { printChats("", false); return; }
     if (verb == "log" && !group.empty()) { printChats(group, true); return; }
     if (!a.empty() && verb != "status") {
         cliPrintf("kq [status] | probe [rounds] | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n"
-                  "   | sendfile <g> <path> | radio [on <g> | off <g>]\n"
+                  "   | sendfile <g> <path>" KQ_RADIO_USAGE "\n"
                   "   | bench field | ctidh | bacap | join | radio [rounds] | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
         return;
     }
@@ -791,7 +803,9 @@ void KqService::onInit() {
     s_rt = new kq::Runtime(kq1::State{storageGetStr("s.kq.name", "kq"), {}}, s_client->box_size());
     // A file is held whole in PSRAM as it is sent or fetched.
     s_rt->eng.max_file = 1 << 20;
+#if CONFIG_STRADDLE_LXST
     applyRadio();
+#endif
     cliRegisterCmd("kq", cliKq);
     rnsServiceRegister(TAG, kqStart, kqStop);
 }

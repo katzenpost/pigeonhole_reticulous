@@ -27,10 +27,9 @@ std::vector<KqChat> kqChats(const std::string& only = "", bool lines = false);
 // create, join, scan, leave: group; invite: group and voucher code; send: group and text.
 void kqCommand(const char* verb, const std::string& group, const std::string& arg = "");
 
-// The radio, in voice builds: groups listened to as radio have their voice bursts played as
+// The radio, in voice builds only: groups listened to as radio have their voice bursts played as
 // they arrive, held in memory only; they are polled every second.
 struct KqRadio {
-    bool voice = false;      // this image can play
     std::string playing;     // ~name while a burst plays
     unsigned queued = 0, heard = 0, missed = 0;
     std::string last;        // the last burst: who, how long, how soon after it was fetched it was heard
