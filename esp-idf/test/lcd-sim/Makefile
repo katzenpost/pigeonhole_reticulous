@@ -33,11 +33,11 @@ $(B)/%.o: %.cpp sim.h lv_conf.h $(wildcard shim/*.h) $(wildcard $(ROOT)/include/
 	@mkdir -p $(B)
 	$(CXX) $(SIM_FLAGS) -c $< -o $@
 
-$(B)/kq_lcd.o: $(APP)/src/kq_lcd.cpp $(APP)/include/kq_app.h $(ROOT)/include/kq_view.h $(QR)/kq_qr.h
+$(B)/kq_lcd.o: $(APP)/src/kq_lcd.cpp $(APP)/include/kq_app.h $(APP)/include/kq_theme.h $(ROOT)/include/kq_view.h $(QR)/kq_qr.h
 	@mkdir -p $(B)
 	$(CXX) $(SIM_FLAGS) -c $< -o $@
 
-$(B)/kq_radio_app.o: $(VOICE)/src/kq_radio_app.cpp $(VOICE)/include/kq_radio_app.h $(ROOT)/include/kq_view.h
+$(B)/kq_radio_app.o: $(VOICE)/src/kq_radio_app.cpp $(VOICE)/include/kq_radio_app.h $(APP)/include/kq_theme.h $(ROOT)/include/kq_view.h
 	@mkdir -p $(B)
 	$(CXX) $(SIM_FLAGS) -c $< -o $@
 

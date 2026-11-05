@@ -10,6 +10,7 @@ struct KqLine {
     enum Mark { NONE, PENDING, WRITTEN, READ } mark = NONE;  // NONE on others' lines
     bool notice = false, mine = false;
     std::string who, text;
+    int64_t time = 0;  // unix seconds, by this device's clock, when it was said or arrived
 };
 
 struct KqChat {
@@ -18,6 +19,7 @@ struct KqChat {
     std::string voucher;  // ours to give out, while waiting to be added; "…" while minting
     unsigned members = 0, pending = 0;
     std::vector<KqLine> lines;  // only when asked for
+    KqLine last;                // the latest message (not a notice); empty text when there is none
 };
 
 // Changes whenever a chat does; a screen redraws when it moves.

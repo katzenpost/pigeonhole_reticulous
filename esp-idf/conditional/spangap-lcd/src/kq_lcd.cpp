@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -14,21 +15,19 @@
 #include "lcd_input_box.h"
 #include "kq1_engine.h"
 #include "kq_qr.h"
+#include "kq_theme.h"
 #include "kq_view.h"
 
 namespace {
 
-const uint32_t C_BG = 0x101418, C_SUB = 0x9098A0, C_ACCENT = 0x2563A0, C_AMBER = 0xE8A33A, C_RULE = 0x232B33,
-               C_OK = 0x36C06A, C_SEL = 0x1B2A3C, C_BAR = 0x0C1014, C_FIELD = 0x2F3B47, C_NOTE = 0x8FA3B6,
-               C_ACT = 0xCFD8E3, C_DIALOG = 0x20262E, C_ME = 0x7FA6FF;
+using namespace kqui;
 
-const lv_font_t *kFont, *kBold, *kItalic, *kSmall, *kBtn, *kBig;
+const lv_font_t *kFont, *kBold, *kSmall, *kBtn, *kBig;
 void refreshFont() {
-    kFont = lcdFont(LcdFace::UI, lcdPx(14));
-    kBold = lcdFont(LcdFace::UI_BOLD, lcdPx(14));
-    kItalic = lcdFont(LcdFace::UI_ITALIC, lcdPx(13));
-    kSmall = lcdFont(LcdFace::UI, lcdPx(11));
-    kBtn = lcdFont(LcdFace::UI_BOLD, lcdPx(12));
+    kFont = lcdFont(LcdFace::UI, lcdPx(PX_BODY));
+    kBold = lcdFont(LcdFace::UI_BOLD, lcdPx(PX_BODY));
+    kSmall = lcdFont(LcdFace::UI, lcdPx(PX_SMALL));
+    kBtn = lcdFont(LcdFace::UI_BOLD, lcdPx(PX_SMALL));
     kBig = lcdFont(LcdFace::MONO_BOLD, lcdPx(15));
 }
 
@@ -103,10 +102,12 @@ lv_obj_t* mkActionBar(lv_obj_t* screen) {
     return bar;
 }
 
+// FOCUSED, not only FOCUS_KEY: focus placed by a click or by the app shows too.
 void focusRing(lv_obj_t* o) {
-    lv_obj_set_style_outline_width(o, lcdPx(2), LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_color(o, lv_color_hex(C_ME), LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_pad(o, 1, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(o, lcdPx(2), LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_color(o, lv_color_hex(C_ME), LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_opa(o, LV_OPA_COVER, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_pad(o, 1, LV_STATE_FOCUSED);
 }
 
 lv_obj_t* mkButton(lv_obj_t* parent, const std::string& text, bool primary, lv_event_cb_t cb) {
@@ -137,15 +138,7 @@ lv_obj_t* mkRow(lv_obj_t* parent) {
     lv_obj_remove_style_all(r);
     lv_obj_set_size(r, lv_pct(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(r, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_ver(r, lcdPx(3), 0);
-    lv_obj_set_style_pad_hor(r, lcdPx(6), 0);
-    lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_border_width(r, 1, 0);
-    lv_obj_set_style_border_color(r, lv_color_hex(C_RULE), 0);
-    for (lv_state_t s : {(lv_state_t)LV_STATE_FOCUSED, (lv_state_t)LV_STATE_PRESSED}) {
-        lv_obj_set_style_bg_color(r, lv_color_hex(C_SEL), s);
-        lv_obj_set_style_bg_opa(r, LV_OPA_COVER, s);
-    }
+    styleRow(r);
     lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
     if (lcdInputGroup()) lv_group_add_obj(lcdInputGroup(), r);
     return r;
@@ -153,6 +146,7 @@ lv_obj_t* mkRow(lv_obj_t* parent) {
 
 struct Header {
     lv_obj_t* bar = nullptr;
+    lv_obj_t* back = nullptr;
     lv_obj_t* title = nullptr;
     lv_obj_t* right = nullptr;
 };
@@ -160,14 +154,9 @@ struct Header {
 // The header bar: a back chevron when there is somewhere to go back to, the title, a note.
 Header mkHeader(lv_obj_t* screen, lv_event_cb_t onBack) {
     Header h;
-    h.bar = mkRowBox(screen, lcdPx(6));
-    lv_obj_set_height(h.bar, lcdPx(26));
-    lv_obj_set_style_pad_hor(h.bar, lcdPx(6), 0);
-    lv_obj_set_style_border_side(h.bar, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_border_width(h.bar, 1, 0);
-    lv_obj_set_style_border_color(h.bar, lv_color_hex(C_RULE), 0);
+    h.bar = headerBar(screen);
     if (onBack) {
-        lv_obj_t* back = mkLabel(h.bar, LV_SYMBOL_LEFT, C_ACT, kFont);
+        lv_obj_t* back = h.back = mkLabel(h.bar, LV_SYMBOL_LEFT, C_ACT, kFont);
         lv_obj_add_flag(back, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_ext_click_area(back, lcdPx(12));
         lv_obj_add_event_cb(back, onBack, LV_EVENT_CLICKED, nullptr);
@@ -216,6 +205,7 @@ void styleField(lv_obj_t* f, const char* placeholder) {
     lv_obj_set_style_pad_ver(f, lcdPx(2), 0);
     lv_obj_set_style_pad_hor(f, lcdPx(6), 0);
     lv_textarea_set_placeholder_text(f, placeholder);
+    focusRing(f);
     if (lcdInputGroup()) lv_group_add_obj(lcdInputGroup(), f);
 }
 
@@ -229,6 +219,7 @@ lv_obj_t* mkField(lv_obj_t* parent, const char* placeholder, int maxLines) {
 lv_obj_t* mkPlainField(lv_obj_t* parent, const char* placeholder) {
     lv_obj_t* f = lv_textarea_create(parent);
     lv_textarea_set_one_line(f, true);
+    lv_obj_set_scrollbar_mode(f, LV_SCROLLBAR_MODE_OFF);  // it would draw over the text
     styleField(f, placeholder);
     lcdKeyboardAttach(f);
     return f;
@@ -244,7 +235,7 @@ lv_timer_t* g_timer = nullptr;
 
 lv_obj_t *s_list = nullptr, *s_listBody = nullptr, *s_chatScr = nullptr, *s_log = nullptr, *s_compose = nullptr,
          *s_voucher = nullptr, *s_dialog = nullptr, *s_dialogField = nullptr, *s_dialogNote = nullptr,
-         *s_dialogOk = nullptr;
+         *s_dialogOk = nullptr, *s_composeBar = nullptr;
 bool g_listening = false;    // the dialog listens for a voucher code by sound
 std::string g_soundShown;    // what of kqSound() was last drawn
 bool g_sendingShown = false;
@@ -253,12 +244,27 @@ Header g_listHdr, g_chatHdr;
 std::string statusOf(const KqChat& c) {
     if (!c.voucher.empty()) return c.voucher == "\xE2\x80\xA6" ? "making your voucher\xE2\x80\xA6" : "waiting to be added";
     if (!c.joined) return "joining\xE2\x80\xA6";
-    std::string s = std::to_string(c.members) + (c.members == 1 ? " other member" : " other members");
+    std::string s = !c.members ? "only you" : std::to_string(c.members) + (c.members == 1 ? " other member" : " other members");
     if (c.adding) s += " \xC2\xB7 adding one";
     if (c.pending) s += " \xC2\xB7 sending";
     return s;
 }
 
+// When a line was said: HH:MM today, else the day ("4 Nov", and the time with full); nothing
+// while the clock has not been set.
+std::string timeOf(int64_t t, bool full) {
+    if (t < 1704067200) return "";  // before 2024: the clock is not set
+    time_t at = (time_t)t, now = time(nullptr);
+    struct tm a, n;
+    localtime_r(&at, &a);
+    localtime_r(&now, &n);
+    bool today = a.tm_year == n.tm_year && a.tm_yday == n.tm_yday;
+    char b[24];
+    strftime(b, sizeof b, today ? "%H:%M" : full ? "%e %b %H:%M" : "%e %b", &a);
+    return b + (b[0] == ' ');
+}
+
+const char* markOf(KqLine::Mark m);
 void openChat(const std::string& id);
 void showScreen(Screen sc);
 
@@ -278,7 +284,8 @@ void closeDialog() {
     lv_obj_delete(o);
     // The release of the key that closed it lands on whatever has focus now, so not on
     // whatever the group falls back to.
-    lv_obj_t* f = g_screen == SC_CHAT ? s_compose : s_listBody ? lv_obj_get_child(s_listBody, 0) : nullptr;
+    lv_obj_t* f = g_screen != SC_CHAT ? (s_listBody ? lv_obj_get_child(s_listBody, 0) : nullptr)
+                 : lv_obj_has_flag(s_composeBar, LV_OBJ_FLAG_HIDDEN) ? g_chatHdr.back : s_compose;
     if (f && lv_obj_get_group(f)) lv_group_focus_obj(f);
 }
 
@@ -356,7 +363,6 @@ void drawList() {
     lv_obj_clean(s_listBody);
     auto chats = kqChats();
     lv_label_set_text(g_listHdr.title, "Group chat");
-    lv_label_set_text_fmt(g_listHdr.right, "%u", (unsigned)chats.size());
     if (chats.empty()) {
         mkWrap(s_listBody,
                "No groups yet. New group starts one; Join makes a voucher code to give to someone "
@@ -365,11 +371,23 @@ void drawList() {
         return;
     }
     for (auto& c : chats) {
+        // The name and when the latest message came; under it that message, or how the group is.
         lv_obj_t* r = mkRow(s_listBody);
-        lv_obj_t* t = mkLabel(r, c.id, 0xFFFFFF, kBold);
+        lv_obj_t* top = mkRowBox(r, lcdPx(6));
+        lv_obj_t* t = mkLabel(top, c.id, 0xFFFFFF, kBold);
         lv_label_set_long_mode(t, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_width(t, lv_pct(100));
-        mkLabel(r, statusOf(c), !c.voucher.empty() ? C_AMBER : C_SUB, kSmall);
+        lv_obj_set_width(t, 1);
+        lv_obj_set_flex_grow(t, 1);
+        bool said = c.joined && !c.adding && !c.last.text.empty();
+        if (said) {
+            std::string when = timeOf(c.last.time, false);
+            if (c.last.mine) when = std::string(markOf(c.last.mark)) + " " + when;
+            mkLabel(top, when, c.last.mine && c.last.mark == KqLine::READ ? C_ME : C_SUB, kSmall);
+        }
+        lv_obj_t* st = mkLabel(r, said ? (c.last.mine ? "you" : c.last.who) + ": " + c.last.text : statusOf(c),
+                               !c.voucher.empty() ? C_AMBER : C_SUB, kSmall);
+        lv_label_set_long_mode(st, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_width(st, lv_pct(100));
         bindString(r, onChatRow, c.id);
     }
     if (at < 0 || !grp) return;
@@ -459,10 +477,12 @@ void drawVoucher(const KqChat& c) {
     lv_obj_set_flex_grow(col, 1);
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(col, lcdPx(4), 0);
+    std::string grouped;  // in fours, to read out and to type; Add member takes it with the spaces
+    for (size_t i = 0; i < c.voucher.size(); i += 4) grouped += (i ? " " : "") + c.voucher.substr(i, 4);
 #if CONFIG_STRADDLE_AUDIO
     mkWrap(col, "Your voucher code: a member of the group scans it, types it into Add member, or hears it.",
            C_AMBER, kSmall);
-    mkWrap(col, c.voucher, 0xFFFFFF, kBig);
+    mkWrap(col, grouped, 0xFFFFFF, kBig);
     lv_obj_t* sr = mkRowBox(col, lcdPx(6));
     lv_obj_t* b = mkButton(sr, g_sendingShown ? "Sending\xE2\x80\xA6" : "Send by sound", false, nullptr);
     bindString(b, [](lv_event_t* e) { kqSoundSend(boundString(e)); }, c.voucher);
@@ -470,7 +490,7 @@ void drawVoucher(const KqChat& c) {
 #else
     mkWrap(col, "Your voucher code: a member of the group scans it or types it into Add member.", C_AMBER,
            kSmall);
-    mkWrap(col, c.voucher, 0xFFFFFF, kBig);
+    mkWrap(col, grouped, 0xFFFFFF, kBig);
 #endif
 }
 
@@ -480,26 +500,46 @@ void drawChat(bool force) {
     lv_label_set_text(g_chatHdr.title, g_chat.c_str());
     if (chats.empty()) { lv_label_set_text(g_chatHdr.right, ""); return; }
     const KqChat& c = chats.front();
-    lv_label_set_text(g_chatHdr.right, c.joined ? std::to_string(c.members + 1).append(" in").c_str() : "");
+    unsigned n = c.members + 1;
+    lv_label_set_text(g_chatHdr.right, c.joined ? (std::to_string(n) + (n == 1 ? " member" : " members")).c_str() : "");
     drawVoucher(c);
+    // Nothing to send to until the group is joined: the voucher gets the room instead.
+    if (c.joined == lv_obj_has_flag(s_composeBar, LV_OBJ_FLAG_HIDDEN)) {
+        if (c.joined) {
+            lv_obj_remove_flag(s_composeBar, LV_OBJ_FLAG_HIDDEN);
+            deferFocus(s_compose);
+        } else {
+            lv_obj_add_flag(s_composeBar, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
     bool bottom = atBottom();
     // shortcut: redraws the last 200 lines on every change; a windowed view that patches
     // only what changed is the upgrade if long groups stutter.
     {
         lv_obj_clean(s_log);
         size_t from = c.lines.size() > 200 ? c.lines.size() - 200 : 0;
+        const KqLine* prev = nullptr;  // the message just above, with no notice between
+        std::string prevWhen;
         for (size_t i = from; i < c.lines.size(); i++) {
             const KqLine& l = c.lines[i];
             if (l.notice) {
-                mkWrap(s_log, "\xE2\x80\x94 " + l.text, C_NOTE, kItalic);
+                mkWrap(s_log, "\xE2\x80\x94 " + l.text, C_NOTE, kSmall);
+                prev = nullptr;
                 continue;
             }
-            lv_obj_t* row = mkBox(s_log);
-            lv_obj_set_width(row, lv_pct(100));
-            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
-            lv_obj_t* who = mkLabel(row, l.who + markOf(l.mark), l.mine ? C_ME : C_OK, kSmall);
-            if (l.mark == KqLine::READ) lv_obj_set_style_text_color(who, lv_color_hex(C_ME), 0);
-            mkWrap(row, l.text, 0xFFFFFF, kFont);
+            // The sender, the mark and the time once for a run of messages that share them.
+            std::string when = timeOf(l.time, true);
+            if (!prev || prev->mine != l.mine || prev->who != l.who || prev->mark != l.mark || prevWhen != when) {
+                lv_obj_t* hd = mkRowBox(s_log, lcdPx(6));
+                lv_obj_set_style_pad_top(hd, lcdPx(4), 0);
+                lv_obj_t* who = mkLabel(hd, (l.mine ? std::string("you") : l.who) + markOf(l.mark), l.mine ? C_ME : C_OK, kBtn);
+                lv_obj_set_width(who, 1);
+                lv_obj_set_flex_grow(who, 1);
+                if (!when.empty()) mkLabel(hd, when, C_SUB, kSmall);
+            }
+            mkWrap(s_log, l.text, 0xFFFFFF, kFont);
+            prev = &l;
+            prevWhen = when;
         }
     }
     if (bottom || force) lv_obj_scroll_to_y(s_log, LV_COORD_MAX, LV_ANIM_OFF);
@@ -592,7 +632,7 @@ void buildChat() {
 
     s_log = mkBody(s_chatScr);
 
-    lv_obj_t* bar = mkRowBox(s_chatScr, lcdPx(6));
+    lv_obj_t* bar = s_composeBar = mkRowBox(s_chatScr, lcdPx(6));
     lv_obj_set_style_bg_color(bar, lv_color_hex(C_BAR), 0);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_TOP, 0);
@@ -674,9 +714,8 @@ void drawLock() {
         case KqLock::UNDECIDED: {
             mkWrap(s_lockBody, "Protect your chats with a passphrase?", 0xFFFFFF, kBold);
             mkWrap(s_lockBody,
-                   "With one, someone who takes this device cannot read your groups or messages, but "
-                   "you type it each time the device starts. Without one, they are kept unencrypted. "
-                   "This is asked once.",
+                   "Without one, whoever holds this device can read your chats. With one, you type it at "
+                   "each start.",
                    C_SUB, kSmall);
             if (!why.empty()) mkWrap(s_lockBody, why, C_AMBER, kSmall);
             s_pass = mkPassField(s_lockBody, "passphrase", [](lv_event_t*) { deferFocus(s_pass2); });
@@ -735,7 +774,7 @@ void showScreen(Screen sc) {
         lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_chatScr, LV_OBJ_FLAG_HIDDEN);
         drawChat(true);
-        deferFocus(s_compose);
+        deferFocus(lv_obj_has_flag(s_composeBar, LV_OBJ_FLAG_HIDDEN) ? g_chatHdr.back : s_compose);
     }
 }
 
@@ -802,7 +841,7 @@ void KqApp::onClose() {
     if (g_listening) kqSoundStop();
 #endif
     s_layer = s_list = s_listBody = s_chatScr = s_log = s_compose = s_voucher = s_dialog = s_dialogField = nullptr;
-    s_dialogNote = s_dialogOk = nullptr;
+    s_dialogNote = s_dialogOk = s_composeBar = nullptr;
     g_listening = g_sendingShown = false;
     g_soundShown.clear();
     s_lockScr = s_lockBody = s_pass = s_pass2 = s_lockErr = nullptr;
