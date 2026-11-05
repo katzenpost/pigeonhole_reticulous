@@ -104,6 +104,8 @@ struct Action {
 };
 
 struct FileWrite { std::string file; Bytes bytes; };
+// A voice burst heard in a radio group: held in memory to be played, never kept.
+struct Clip { ChatId chat; Key sender; std::string name; Bytes bytes; };
 // What a step changed, for the caller to save: chats, and log lines changed or dropped.
 struct Changes {
     std::set<ChatId> chats, removed;
@@ -112,6 +114,7 @@ struct Changes {
 };
 struct StepResult {
     std::vector<FileWrite> files;
+    std::vector<Clip> clips;
     Changes changes;
     std::vector<Action> actions;
 };
@@ -222,7 +225,8 @@ public:
     uint64_t wire_version = CURRENT_VERSION;
     // The largest file sent, kept or fetched: a device has less room than MAX_FILE.
     size_t max_file = MAX_FILE;
-    // Groups listened to as radio: their streams are polled every RADIO_POLL_MS, not backed off.
+    // Groups listened to as radio: their streams are polled every RADIO_POLL_MS, not backed off,
+    // and the audio/opus files others send there are clips, not lines or files kept.
     std::set<ChatId> radio;
 
     Engine(State s, size_t max) : state(std::move(s)), max_plaintext(max) {}

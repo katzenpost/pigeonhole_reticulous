@@ -9,9 +9,10 @@ namespace kq {
 
 // ---- Runtime ----
 
-void Runtime::release(const kq1::StepResult& r) {
+void Runtime::release(kq1::StepResult&& r) {
     steps++;
     if (on_file) for (auto& f : r.files) on_file(f);
+    if (on_clip) for (auto& c : r.clips) on_clip(std::move(c));
     for (auto& a : r.actions) ready_.push_back(a);
     if (on_changes && !r.changes.empty()) on_changes(r.changes);
 }
