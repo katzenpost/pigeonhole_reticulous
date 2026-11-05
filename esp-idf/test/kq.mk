@@ -25,7 +25,7 @@ ifeq ($(INT128),0)
 CTIDH_DEFS += -DFIAT_P1024_NO_INT128
 endif
 QR := $(ROOT)/components/kq_qrcode
-QR_O := $(B)/qrcodegen.o
+QR_O := $(B)/qr/qrcodegen.o
 KQ_SRC := $(filter-out $(ROOT)/src/kq_service.cpp,$(wildcard $(ROOT)/src/*.cpp))
 KQ_O := $(patsubst $(ROOT)/src/%.cpp,$(B)/kq/%.o,$(KQ_SRC))
 
@@ -53,6 +53,6 @@ $(B)/kq/%.o: $(ROOT)/src/%.cpp $(wildcard $(ROOT)/include/*.h)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(QR_O): $(QR)/qrcodegen.c $(QR)/qrcodegen.h
-	@mkdir -p $(B)
+$(B)/qr/%.o: $(QR)/%.c $(QR)/qrcodegen.h
+	@mkdir -p $(dir $@)
 	$(CC) -O2 -std=c99 -I$(QR) -c $< -o $@
