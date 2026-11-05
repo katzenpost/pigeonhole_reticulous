@@ -227,6 +227,11 @@ uint64_t backoff(size_t n);
 // How often a radio group's members are polled: a burst is heard about this long after it lands.
 constexpr uint64_t RADIO_POLL_MS = 1000;
 std::string voucher_code(const Bytes& voucher);
+// The voucher a code holds (whitespace skipped), if it is one.
+std::optional<Bytes> from_code(const std::string& code);
+// Four digits of SHAKE256(voucher), shown on both screens when a voucher goes across by sound:
+// the same digits on both say the right one came. "" when code is not a voucher code.
+std::string voucher_check(const std::string& code);
 std::string sanitize(const std::string& name);
 
 class Engine {

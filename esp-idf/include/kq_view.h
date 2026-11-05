@@ -48,6 +48,22 @@ void kqRadioSetTalk(const std::string& group);
 enum class KqStream { START, DATA, END };
 void kqStream(const std::string& group, const std::string& name, KqStream step, const std::vector<uint8_t>& bytes = {});
 
+// A voucher code sent or heard by sound, where the board has a speaker and a microphone
+// (spangap/audio): one 1.2 s MFSK frame, played quietly for a device 10-30 cm away. Listening
+// stops after kListenMs. Both screens show the code's check digits (kq1::voucher_check).
+struct KqSound {
+    enum State { IDLE, SENDING, LISTENING, HEARD, FAILED } state = IDLE;
+    std::string code;      // HEARD: the voucher code heard
+    uint32_t left_ms = 0;  // LISTENING: what is left of it
+    std::string why;       // FAILED
+    static constexpr uint32_t kListenMs = 15000;
+};
+KqSound kqSound();
+bool kqSoundBusy();  // sending or listening: the radio holds its bursts meanwhile
+void kqSoundSend(const std::string& code);
+void kqSoundListen();
+void kqSoundStop();  // and back to IDLE from HEARD or FAILED
+
 // Whether the chats can be read yet: at first start the user chooses whether a passphrase
 // protects them; with one, they stay locked after every start until it is given.
 enum class KqLock { STARTING, UNDECIDED, LOCKED, UNLOCKING, OPEN, LOST };

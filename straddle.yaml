@@ -18,3 +18,5 @@ services:
   # The radio, compiled only when the lxst voice session is staged (conditional/lxst/): voice builds.
   - { class: KqRadioService, header: kq_radio.h, when: reticulous/lxst }
   - { class: KqRadioApp, header: kq_radio_app.h, when: reticulous/lxst }
+  # Voucher codes by sound, where the board has a speaker and a microphone (conditional/audio/).
+  - { class: KqSoundService, header: kq_sound.h, when: spangap/audio }

@@ -26,6 +26,8 @@ CTIDH_DEFS += -DFIAT_P1024_NO_INT128
 endif
 QR := $(ROOT)/components/kq_qrcode
 QR_O := $(B)/qr/qrcodegen.o
+FSKV := $(ROOT)/components/kq_fskv
+FSKV_O := $(B)/fskv/fskv.o
 KQ_SRC := $(filter-out $(ROOT)/src/kq_service.cpp,$(wildcard $(ROOT)/src/*.cpp))
 KQ_O := $(patsubst $(ROOT)/src/%.cpp,$(B)/kq/%.o,$(KQ_SRC))
 # The voice slice's parts that need no lxst (conditional/lxst/, built on a device only with it).
@@ -40,7 +42,7 @@ endif
 CFLAGS := -O2 -g -DCONFIGURED -DNATIVE_LITTLE_ENDIAN -DHAVE_WEAK_SYMBOLS -D__STDC_LIMIT_MACROS \
 	-D__STDC_CONSTANT_MACROS -I$(SODIUM_SRC)/include -I$(SODIUM_SRC)/include/sodium -w
 CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -fsanitize=address,undefined \
-	-I$(ROOT)/include -I$(ROOT)/conditional/lxst/include -I$(QR) -I$(SODIUM_SRC)/include -I$(CTIDH)/highctidh $(CTIDH_DEFS) $(MBED_INC)
+	-I$(ROOT)/include -I$(ROOT)/conditional/lxst/include -I$(QR) -I$(FSKV) -I$(SODIUM_SRC)/include -I$(CTIDH)/highctidh $(CTIDH_DEFS) $(MBED_INC)
 LDLIBS := $(MBED_LIB) -lmbedcrypto -fsanitize=address,undefined
 
 $(B)/sodium/%.o: $(SODIUM_SRC)/%.c
@@ -63,3 +65,7 @@ $(B)/voice/%.o: $(ROOT)/conditional/lxst/src/%.cpp $(wildcard $(ROOT)/include/*.
 $(B)/qr/%.o: $(QR)/%.c $(QR)/qrcodegen.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -std=c99 -I$(QR) -c $< -o $@
+
+$(B)/fskv/%.o: $(FSKV)/%.c $(FSKV)/fskv.h
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -std=c11 -Wall -Wextra -fsanitize=address,undefined -c $< -o $@

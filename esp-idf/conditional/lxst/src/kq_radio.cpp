@@ -235,7 +235,8 @@ void radioMain(void*) {
             }
         }
         if (!s_feed.active() && s_st.playing.empty()) {
-            if (s_cur.data == nullptr && next(s_cur)) {
+            // A voucher going by sound has the speaker and the microphone: bursts wait for it.
+            if (s_cur.data == nullptr && !kqSoundBusy() && next(s_cur)) {
                 if (!open()) {
                     warn("kq radio: the voice session is in use; %s's burst is missed", s_cur.who.c_str());
                     release(s_cur);

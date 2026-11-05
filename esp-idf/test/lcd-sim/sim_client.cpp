@@ -25,6 +25,9 @@
 #include "kq_ogg.h"
 #include "kq_radio_feed.h"
 #include "kq_view.h"
+#include "fskv.h"
+#include "fskv_room.h"
+#include "kq1_engine.h"
 #include "sim.h"
 
 void simHear(kq1::Clip&& c);
@@ -130,7 +133,7 @@ void bridge(std::function<void(std::function<void()>)> fn) {
     p.get_future().wait();
 }
 
-std::string g_name;
+std::string g_name, g_stateDir;
 
 // Under g_mu, once the vault opens: as the kq task's loadChats.
 void loadChats() {
@@ -180,6 +183,7 @@ void simClientStart(const std::string& socketPath, const std::string& name, size
     g_backend = new kq::ReplicaBackend(*g_client, bridge);
     g_rt = new kq::Runtime(kq1::State{name, {}}, boxSize);
     g_name = name;
+    g_stateDir = stateDir;
     g_vault = new kq::Vault(kq::posix_files(stateDir));
     std::thread(workerMain, &g_light).detach();
     std::thread(workerMain, &g_heavy).detach();
@@ -274,4 +278,75 @@ void kqCommand(const char* verb, const std::string& group, const std::string& ar
     std::lock_guard<std::mutex> g(g_mu);
     if (!g_store) return;
     g_rt->input(nowS(), nowMs(), *in);
+}
+
+// The sound: Send by sound writes what the speaker would play to <state>/sound.wav, and simListen
+// plays a recording to the microphone 20 ms at a time, through the device's receiver.
+namespace {
+KqSound g_sound;
+uint64_t g_soundUntil = 0;
+}
+
+KqSound kqSound() {
+    std::lock_guard<std::mutex> g(g_mu);
+    uint64_t now = nowMs();
+    if (g_sound.state == KqSound::SENDING && now >= g_soundUntil) g_sound.state = KqSound::IDLE;
+    if (g_sound.state == KqSound::LISTENING && now >= g_soundUntil) {
+        g_sound.state = KqSound::FAILED;
+        g_sound.why = "heard no voucher in 15 s";
+    }
+    KqSound s = g_sound;
+    if (s.state == KqSound::LISTENING) s.left_ms = (uint32_t)(g_soundUntil - now);
+    return s;
+}
+
+bool kqSoundBusy() {
+    KqSound s = kqSound();
+    return s.state == KqSound::SENDING || s.state == KqSound::LISTENING;
+}
+
+void kqSoundSend(const std::string& code) {
+    auto v = kq1::from_code(code);
+    if (!v) return;
+    std::vector<int16_t> pcm(16000 / 5 + FSKV_SAMPLES + 16000 / 10);
+    fskv_modulate(v->data(), 9268, pcm.data() + 16000 / 5);  // -20 dBFS, as the device plays it
+    std::string path = g_stateDir + "/sound.wav";
+    wav_write(path.c_str(), pcm.data(), pcm.size());
+    fprintf(stderr, "sim: sound: played %s's voucher into %s\n", code.c_str(), path.c_str());
+    std::lock_guard<std::mutex> g(g_mu);
+    g_sound = KqSound{};
+    g_sound.state = KqSound::SENDING;
+    g_soundUntil = nowMs() + pcm.size() / 16 + 300;
+}
+
+void kqSoundListen() {
+    std::lock_guard<std::mutex> g(g_mu);
+    g_sound = KqSound{};
+    g_sound.state = KqSound::LISTENING;
+    g_soundUntil = nowMs() + KqSound::kListenMs;
+}
+
+void kqSoundStop() {
+    std::lock_guard<std::mutex> g(g_mu);
+    g_sound = KqSound{};
+}
+
+void simListen(const std::string& wav) {
+    std::vector<int16_t> x(16000 * 15);
+    x.resize(wav_read(wav.c_str(), x.data(), x.size()));
+    static int16_t buf[FSKV_RX_MIN];
+    static fskv_rx rx;
+    fskv_rx_init(&rx, buf, FSKV_RX_MIN);
+    uint8_t v[32];
+    for (size_t at = 0; at < x.size(); at += 320) {
+        if (kqSound().state != KqSound::LISTENING) return;
+        if (!fskv_rx_push(&rx, x.data() + at, std::min<size_t>(320, x.size() - at), v)) continue;
+        std::string code = kq1::voucher_code(kq1::Bytes(v, v + 32));
+        fprintf(stderr, "sim: sound: heard %s, RS fixed %d, clock %.4f\n", code.c_str(), rx.st.rs_fixed, rx.st.a);
+        std::lock_guard<std::mutex> g(g_mu);
+        g_sound.state = KqSound::HEARD;
+        g_sound.code = code;
+        return;
+    }
+    fprintf(stderr, "sim: sound: no voucher in %s (%zu samples)\n", wav.c_str(), x.size());
 }
