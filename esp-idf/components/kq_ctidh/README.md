@@ -16,10 +16,14 @@ All of CTIDH's time goes into four field functions, `fiat_p1024_mul`, `_square`,
 | `fiat` | fiat-crypto's `highctidh/fiat_p1024.c` | 190 KB of straight-line code per multiply on Xtensa |
 
 Firmware: `idf.py -DKQ_CTIDH_FIELD=fiat` (through spangap:
-`spangap build -w … -- reticulous/reticulous -DKQ_CTIDH_FIELD=fiat build`). The value stays in the
-build's CMake cache until it is set again. With no value the firmware takes `xtensa` when
+`spangap build -w … -- reticulous/reticulous -DKQ_CTIDH_FIELD=fiat build`). The value counts for
+the configure run it is given to and is then dropped from the CMake cache, so give it to every
+build that should use it (`spangap build` configures on every build); a tree left with a value
+from before this rule uses it once more. With no value the firmware takes `xtensa` when
 `IDF_TARGET` is `esp32s3` and `mont32` on other targets (the Linux image), which cannot assemble
-it; `xtensa` on another target stops the build. Host: `make -C test/host KQ_CTIDH_FIELD=fiat`.
+it; `xtensa` on another target stops the build. The build log names the field
+(`kq_ctidh: the xtensa CTIDH field`), and an ESP32-S3 build with another field warns. Host:
+`make -C test/host KQ_CTIDH_FIELD=fiat`.
 
 With mont32, `linker.lf` puts `fp1024_mont32` in IRAM (`noflash`), and with xtensa
 `linker_xtensa.lf` does the same for `fp1024_xtensa`, so the field never waits on flash through
@@ -55,4 +59,7 @@ xtensa against mont32, in `test_apps/field`'s image: `.iram0.text` −44 B, `.dr
   `one-insn-per-tb` is needed for xtensa: its MAC16 load-and-multiply instructions often load
   one of their own source registers, which the ISA defines, and QEMU 9.2.2 gets that wrong
   between the instructions of one translation block.
+- The voucher's CTIDH on the ESP32-S3, in QEMU: `make -C esp-idf/test/qemu-voucher run` runs
+  `test/host/test_voucher.cpp` (mint, induct, sealed reply and open, both forms, against hpqc's
+  vectors) with the field the firmware takes there, its stack in PSRAM as on the device.
 - Timing: `kq bench field|ctidh` on a device, `esp-idf/test/bench` on the host.
