@@ -2,8 +2,8 @@
 // The katzenqt1 client engine, sans IO, as pigeonhole_protocols rust/src/protocols/katzenqt1/engine:
 // chats, their logs and their pending writes over the member state machine. Engine::step takes
 // an Input and returns Actions to carry out; Executor carries them out over a Backend and turns
-// each into the Input that reports it. File attachments and long messages (chunk streams) are
-// left out: a box too large to write is refused with a notice, and a chunk stream is stepped past.
+// each into the Input that reports it. A message too long for a box, a file's most often, goes
+// to a substream of its own, which an I box in the member's stream names.
 #pragma once
 #include <map>
 #include <set>
@@ -43,6 +43,7 @@ enum class NoticeKind {
 };
 struct Notice { NoticeKind kind; std::vector<std::string> args; };
 std::string plain(const Notice& n);
+std::string size_text(size_t n);
 
 // ---- inputs and actions ----
 
@@ -50,42 +51,49 @@ struct Input {
     enum Kind {
         CREATE, JOIN, INDUCT, SEND, SCAN, LEAVE, REMOVE_MEMBER, CLEAR, RENAME, CREATED, WROTE, REFUSED, READ, WAKE,
         SCAN_READ, WALKED, DERIVED, MINTED, OPENED, JOINER_PAYLOAD, SEALED_REPLY, PUBLISHED, EPOCH, FAILED,
+        SEND_FILE, LOADED, SUBSTREAM, WROTE_CHUNK, CHUNK_INDEXES, READ_CHUNK,
     } kind;
     explicit Input(Kind k) : kind(k) {}
     ChatId chat;
-    std::string name, code, text, to, what;  // CREATE/JOIN name, INDUCT code, SEND text, RENAME to, FAILED what
+    std::string name, code, text, to, what;  // CREATE/JOIN/SEND_FILE name, INDUCT code, SEND text, RENAME to, FAILED what
     Key who;                                 // REMOVE_MEMBER
     bool joining = false;                    // CREATED
-    Keypair keypair;                         // CREATED
-    size_t job = 0;                          // WROTE, REFUSED
-    Index index, next;                       // WROTE; READ, SCAN_READ: index
-    Key stream;                              // READ, WAKE, SCAN_READ, WALKED, DERIVED
-    Outcome outcome;                         // READ, SCAN_READ
+    Keypair keypair;                         // CREATED, SUBSTREAM
+    size_t job = 0;                          // WROTE, REFUSED, LOADED, SUBSTREAM, WROTE_CHUNK, CHUNK_INDEXES
+    Index index, next;                       // WROTE, WROTE_CHUNK next; READ, SCAN_READ, READ_CHUNK index; CHUNK_INDEXES index: start
+    Key stream;                              // READ, WAKE, SCAN_READ, WALKED, DERIVED, READ_CHUNK
+    Outcome outcome;                         // READ, SCAN_READ, READ_CHUNK
     WalkResult walked;                       // WALKED
-    std::vector<Index> indexes;              // DERIVED
+    std::vector<Index> indexes;              // DERIVED, CHUNK_INDEXES
+    std::optional<Bytes> bytes;              // SEND_FILE; LOADED, nothing when the file is gone
     Minted minted;                           // MINTED
     Index box1;                              // MINTED, JOINER_PAYLOAD
     Opened opened;                           // OPENED
     Bytes voucher, voucher_write_cap, payload;  // JOINER_PAYLOAD
     Inducted inducted;                       // SEALED_REPLY
-    size_t n = 0;                            // EPOCH
+    size_t n = 0;                            // EPOCH; WROTE_CHUNK the box
 };
 
 struct Action {
-    enum Kind { CREATE, WRITE, READ, WAKE, SCAN_READ, WALK, DERIVE, MINT, AWAIT_REPLY, READ_VOUCHER, SEAL, PUBLISH } kind;
+    enum Kind {
+        CREATE, WRITE, READ, WAKE, SCAN_READ, WALK, DERIVE, MINT, AWAIT_REPLY, READ_VOUCHER, SEAL, PUBLISH,
+        DELETE, LOAD, SUBSTREAM, WRITE_CHUNK, CHUNK_INDEXES, READ_CHUNK,
+    } kind;
     explicit Action(Kind k) : kind(k) {}
     ChatId chat;
     bool joining = false;            // CREATE
-    size_t job = 0;                  // WRITE
-    Bytes write_cap;                 // WRITE, MINT, AWAIT_REPLY
-    Index index;                     // WRITE, READ, SCAN_READ
-    Bytes box;                       // WRITE
-    Key stream;                      // READ, WAKE, SCAN_READ, WALK, DERIVE
-    Bytes read_cap;                  // READ, SCAN_READ
+    size_t job = 0;                  // WRITE, LOAD, SUBSTREAM, WRITE_CHUNK, CHUNK_INDEXES
+    size_t n = 0;                    // WRITE_CHUNK: the box
+    Bytes write_cap;                 // WRITE, MINT, AWAIT_REPLY, WRITE_CHUNK
+    Index index;                     // WRITE, READ, SCAN_READ, WRITE_CHUNK, READ_CHUNK
+    Bytes box;                       // WRITE, WRITE_CHUNK
+    Key stream;                      // READ, WAKE, SCAN_READ, WALK, DERIVE, READ_CHUNK
+    Bytes read_cap;                  // READ, SCAN_READ, READ_CHUNK
     uint64_t ms = 0;                 // WAKE
-    Index start;                     // WALK, DERIVE
+    Index start;                     // WALK, DERIVE, CHUNK_INDEXES
     std::vector<uint64_t> targets;   // WALK
-    size_t keep = 0, count = 0;      // WALK keep, DERIVE count
+    size_t keep = 0, count = 0;      // WALK keep, DERIVE and CHUNK_INDEXES count
+    std::string file;                // DELETE, LOAD
     std::string name;                // MINT
     uint8_t form = 2;                // MINT
     Bytes secret_key, voucher_read_cap;  // AWAIT_REPLY
@@ -110,12 +118,37 @@ struct StepResult {
 
 // ---- state ----
 
+// A message written to a substream: its boxes from sent on are still to write, at next on.
+struct Upload {
+    std::string file;  // the message, kept until its boxes are written
+    size_t box_size = 0, total = 0;
+    Bytes write_cap;   // the substream's; empty until made
+    size_t sent = 0;
+    Index next;
+    bool operator==(const Upload& o) const {
+        return file == o.file && box_size == o.box_size && total == o.total && write_cap == o.write_cap && sent == o.sent &&
+               next == o.next;
+    }
+};
 struct Job {
     size_t id = 0;
     std::optional<size_t> token;
     std::optional<Index> index;
-    Bytes box;
+    Bytes box;  // an upload's I box, once its substream is written
     std::optional<size_t> line;
+    std::optional<Upload> upload;
+};
+struct Attachment {
+    std::string name, filetype;
+    size_t size = 0;
+    std::string file;  // where its bytes are kept
+};
+// A member's long message being read from its substream; index is where its I box is.
+struct Download {
+    Key stream;
+    Index index, next;
+    Bytes read_cap;
+    std::optional<size_t> total;
 };
 enum class Status { Sent, Pending };
 struct Line {
@@ -127,6 +160,7 @@ struct Line {
     Status status = Status::Sent;
     std::optional<uint64_t> idx64;
     int64_t time = 0;
+    std::optional<Attachment> attachment;
 };
 struct Joining { std::string code; Bytes secret_key, voucher_read_cap; Index box1; uint8_t version = 2; };
 struct Sealed { std::string name; Bytes mutated_read_cap, reply; uint8_t version = 2; };
@@ -154,8 +188,12 @@ struct Chat {
     std::optional<Joining> joining;
     std::optional<Inducting> inducting;
     size_t next_id = 0;
+    std::vector<Download> downloads;
 
     size_t fresh() { return next_id++; }
+    Job* job(size_t id);
+    // The files its lines and uploads keep.
+    std::vector<std::string> files() const;
     // A line of ours another member has acknowledged reading.
     bool acknowledged(const Line& l) const;
 };
@@ -180,6 +218,8 @@ public:
     size_t max_plaintext;
     size_t epoch = 0;
     uint64_t wire_version = CURRENT_VERSION;
+    // The largest file sent, kept or fetched: a device has less room than MAX_FILE.
+    size_t max_file = MAX_FILE;
 
     Engine(State s, size_t max) : state(std::move(s)), max_plaintext(max) {}
     StepResult step(int64_t now, const Input& input);
@@ -187,10 +227,21 @@ public:
     StepResult resume(int64_t now);
 
 private:
+    using JobKey = std::pair<ChatId, size_t>;
+    using StreamKey = std::pair<ChatId, Key>;
+    // What is under way on the network; not saved, since a restart begins it again.
     struct Flight {
         std::set<ChatId> writing;
-        std::set<std::pair<ChatId, Key>> reading;
-        std::map<std::pair<ChatId, Key>, size_t> misses;
+        std::set<StreamKey> reading;
+        std::map<StreamKey, size_t> misses;
+        std::set<JobKey> uploading;                              // a substream being made or indexes derived
+        std::map<JobKey, std::vector<Index>> ahead;              // the index of each box from the first unwritten on
+        std::map<JobKey, std::set<size_t>> chunks_out;           // the boxes being written
+        std::map<JobKey, std::vector<std::pair<size_t, Index>>> landed;  // written after one not yet written
+        std::set<JobKey> loading;                                // a message being read back from its file
+        std::map<JobKey, Bytes> blobs;                           // each upload's message
+        std::map<StreamKey, std::pair<Index, std::vector<Bytes>>> fetched;  // each download's next index and boxes
+        std::map<std::pair<Key, Index>, Bytes> arriving;         // a file's bytes, while its message is read
         void forget(const ChatId& chat);
     } flight_;
     struct Cx;
@@ -230,9 +281,16 @@ struct Done {
     uint64_t ms = 0;              // RETRY, LATER
 };
 
+// The files the engine keeps, for its DELETE and LOAD.
+struct Files {
+    std::function<std::optional<Bytes>(const std::string&)> read;
+    std::function<void(const std::string&)> remove;
+};
+
 struct Executor {
     Backend& backend;
     std::function<void(uint64_t)> sleep;  // between attempts at a write that must land
+    Files files = {};
     Done perform(const Action& a);
 
 private:

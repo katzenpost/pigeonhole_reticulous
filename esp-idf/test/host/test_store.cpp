@@ -4,6 +4,7 @@
 #include <sodium.h>
 
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 
 #include "kq_store.h"
@@ -99,6 +100,31 @@ int main() {
     s.commit(st, rm);
     check(files.size() == before - 2, v, "removed: record and journal gone");
     check(kq::state_dump(kq::Store(kq::memory_files(files)).load("x")) == kq::state_dump(st), v, "after a removal");
+
+    // Records saved before files: no uploads, downloads or attachments, which load as none.
+    {
+        std::map<std::string, std::string> old;
+        State o{"tdeck", {chat("old", 2)}};
+        o.chats[0].jobs.push_back(Job{3, 1, std::nullopt, Bytes{'F'}, std::nullopt, std::nullopt});
+        kq::Store(kq::memory_files(old)).commit(o, all(o));
+        for (auto& [n, d] : old)
+            for (const char* f : {",\"upload\":null", ",\"downloads\":[]", "\"attachment\":null,"})
+                for (size_t at; (at = d.find(f)) != std::string::npos;) d.erase(at, strlen(f));
+        bool stripped = true;
+        for (auto& [n, d] : old) stripped &= d.find("upload") == std::string::npos && d.find("attachment") == std::string::npos;
+        problems.clear();
+        check(stripped && kq::state_dump(kq::Store(kq::memory_files(old)).load("x", &problems)) == kq::state_dump(o) &&
+                  problems.empty(), v, "a record from before files loads");
+        // And a chat with them comes back as it was.
+        Chat& c = o.chats[0];
+        c.jobs[0].upload = Upload{"spool/old-1-3.cbor", 1549, 14, Bytes(168, 2), 5, Bytes(104, 3)};
+        c.log[0].attachment = Attachment{"cat.png", "image/png", 20000, "attachments/old/1-0-cat.png"};
+        c.downloads.push_back(Download{Bytes(32, 4), Bytes(104, 5), Bytes(104, 6), Bytes(136, 7), 14});
+        c.downloads.push_back(Download{Bytes(32, 8), Bytes(104, 9), Bytes(104, 10), Bytes(136, 11), std::nullopt});
+        kq::Store(kq::memory_files(old)).commit(o, all(o));
+        check(kq::state_dump(kq::Store(kq::memory_files(old)).load("x")) == kq::state_dump(o), v,
+              "uploads, downloads and attachments load as saved");
+    }
 
     // A broken record leaves that conversation out and says so.
     for (auto& [n, dd] : files)

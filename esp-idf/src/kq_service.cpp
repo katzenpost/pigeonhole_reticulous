@@ -205,7 +205,12 @@ static void bridge(std::function<void(std::function<void()>)> fn) {
 static void workerMain(void* arg) {
     bool isHeavy = arg != nullptr;
     QueueHandle_t q = isHeavy ? s_heavyQ : s_lightQ;
-    kq1::Executor x{*s_backend, [](uint64_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }};
+    kq1::Executor x{*s_backend, [](uint64_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); },
+                    {[](const std::string& f) -> std::optional<kq::Bytes> {
+                         auto d = s_vault->files().read(f);
+                         return d ? std::optional<kq::Bytes>(kq::Bytes(d->begin(), d->end())) : std::nullopt;
+                     },
+                     [](const std::string& f) { s_vault->files().remove(f); }}};
     for (;;) {
         kq1::Action* a = nullptr;
         if (xQueueReceive(q, &a, portMAX_DELAY) != pdTRUE || !a) continue;
@@ -252,6 +257,22 @@ static void probe(unsigned rounds) {
         warn("kq probe: one is running, or no rounds asked");
 }
 
+// A file on this node's file system, sent to a group.
+static std::optional<kq1::Input> sendFile(const std::string& group, const std::string& path) {
+    int h = fs_open(path.c_str(), "rb");
+    if (h < 0) { warn("kq sendfile: no file %s", path.c_str()); return std::nullopt; }
+    kq::Bytes b;
+    uint8_t buf[1024];
+    size_t k;
+    while ((k = fs_read(buf, 1, sizeof buf, h)) > 0) b.insert(b.end(), buf, buf + k);
+    fs_close(h);
+    kq1::Input in(kq1::Input::SEND_FILE);
+    in.chat = group;
+    in.name = path.substr(path.rfind('/') + 1);
+    in.bytes = std::move(b);
+    return in;
+}
+
 // Commands reach the kq task as storage keys "kq.cmd.<verb>" = "<group>|<argument>",
 // since the Channel's ITS handle belongs to this task.
 static void onCmd(const char* key, const char* val) {
@@ -263,6 +284,7 @@ static void onCmd(const char* key, const char* val) {
     size_t bar = v.find('|');
     std::string group = v.substr(0, bar), arg = bar == std::string::npos ? "" : v.substr(bar + 1);
     auto in = kq::input_of(verb, group, arg);
+    if (verb == "sendfile") in = sendFile(group, arg);
     if (!in) return;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_rt->input(nowS(), nowMs(), *in);
@@ -274,6 +296,9 @@ static void onCmd(const char* key, const char* val) {
 static kq::StoreFiles fsFiles(const std::string& dir) {
     auto path = [dir](const std::string& n) { return dir + "/" + n; };
     auto put = [](const std::string& p, const std::string& d, const char* mode) {
+        // Attachments and the spool are kept in directories of their own.
+        size_t slash = p.rfind('/');
+        if (slash != std::string::npos) fs_mkdirp(p.substr(0, slash).c_str());
         int f = fs_open(p.c_str(), mode);
         if (f < 0) return false;
         bool ok = fs_write(d.data(), 1, d.size(), f) == d.size() && fs_sync(f) == 0;
@@ -311,6 +336,10 @@ static void loadChats() {
     std::vector<std::string> problems;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_rt->eng.state = s_store->load(storageGetStr("s.kq.name", "kq"), &problems);
+    s_rt->on_file = [](const kq1::FileWrite& f) {
+        if (!s_vault->files().replace(f.file, std::string(f.bytes.begin(), f.bytes.end())))
+            err("kq: keeping %s failed", f.file.c_str());
+    };
     s_rt->on_changes = [](const kq1::Changes& ch) {
         if (!s_store->commit(s_rt->eng.state, ch)) err("kq: saving the chats failed");
     };
@@ -546,7 +575,7 @@ static void cliKq(const char* args) {
         kqCommand(verb.c_str(), group);
         return;
     }
-    if ((verb == "invite" || verb == "send") && !group.empty() && !arg.empty()) {
+    if ((verb == "invite" || verb == "send" || verb == "sendfile") && !group.empty() && !arg.empty()) {
         kqCommand(verb.c_str(), group, arg);
         return;
     }
@@ -554,6 +583,7 @@ static void cliKq(const char* args) {
     if (verb == "log" && !group.empty()) { printChats(group, true); return; }
     if (!a.empty() && verb != "status") {
         cliPrintf("kq [status] | probe [rounds] | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n"
+                  "   | sendfile <g> <path>\n"
                   "   | bench field | ctidh | bacap | radio [rounds] | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
         return;
     }
@@ -647,6 +677,8 @@ void KqService::onInit() {
     s_bridgeQ = xQueueCreate(2, sizeof(BridgeReq*));
     s_backend = new kq::ReplicaBackend(*s_client, bridge);
     s_rt = new kq::Runtime(kq1::State{storageGetStr("s.kq.name", "kq"), {}}, s_client->box_size());
+    // A file is held whole in PSRAM as it is sent or fetched.
+    s_rt->eng.max_file = 1 << 20;
     cliRegisterCmd("kq", cliKq);
     rnsServiceRegister(TAG, kqStart, kqStop);
 }

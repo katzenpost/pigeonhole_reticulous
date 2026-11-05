@@ -44,6 +44,13 @@ std::string plain(const Notice& n) {
     return "";
 }
 
+std::string size_text(size_t n) {
+    constexpr size_t MB = 1024 * 1024;
+    if (n < 1024) return std::to_string(n) + " bytes";
+    if (n < MB) return std::to_string((n + 512) / 1024) + " KB";
+    return std::to_string(n / MB) + "." + std::to_string(n % MB * 10 / MB) + " MB";
+}
+
 uint64_t backoff(size_t n) { return std::min<uint64_t>(60000, 2000ull << std::min<size_t>(n, 5)); }
 
 std::string voucher_code(const Bytes& v) {
@@ -92,6 +99,12 @@ static std::string slug(const std::string& group) {
 
 static std::string voucher_file(const std::string& group) { return "voucher-" + slug(group) + ".txt"; }
 
+static std::string file_text(const Attachment& a) { return "[file " + a.name + ", " + size_text(a.size) + "]"; }
+
+static std::string attachment_file(const Chat& c, size_t id, int64_t now, const std::string& name) {
+    return "attachments/" + slug(c.name) + "/" + std::to_string(now) + "-" + std::to_string(id) + "-" + name;
+}
+
 static uint8_t voucher_form(uint64_t version) { return version == MAP_VERSION ? 1 : 2; }
 
 static std::optional<Message> message_of(const Bytes& plaintext) {
@@ -136,6 +149,18 @@ bool Chat::acknowledged(const Line& l) const {
     return false;
 }
 
+Job* Chat::job(size_t id) {
+    for (auto& j : jobs) if (j.id == id) return &j;
+    return nullptr;
+}
+
+std::vector<std::string> Chat::files() const {
+    std::vector<std::string> fs;
+    for (auto& l : log) if (l.attachment) fs.push_back(l.attachment->file);
+    for (auto& j : jobs) if (j.upload) fs.push_back(j.upload->file);
+    return fs;
+}
+
 Chat* State::chat(const ChatId& id) {
     for (auto& c : chats) if (c.id == id) return &c;
     return nullptr;
@@ -150,7 +175,9 @@ bool State::wanted(const Action& a) const {
     switch (a.kind) {
         case Action::AWAIT_REPLY: return c && c->joining && c->joining->secret_key == a.secret_key;
         case Action::READ_VOUCHER: return c && c->inducting && !c->inducting->payload && c->inducting->voucher == a.voucher;
-        case Action::WRITE: case Action::READ: case Action::SCAN_READ: case Action::WALK: case Action::DERIVE: return c != nullptr;
+        case Action::WRITE: case Action::READ: case Action::SCAN_READ: case Action::WALK: case Action::DERIVE:
+        case Action::SUBSTREAM: case Action::WRITE_CHUNK: case Action::CHUNK_INDEXES: case Action::READ_CHUNK:
+            return c != nullptr;
         default: return true;
     }
 }
@@ -158,7 +185,20 @@ bool State::wanted(const Action& a) const {
 void Engine::Flight::forget(const ChatId& chat) {
     writing.erase(chat);
     for (auto it = reading.begin(); it != reading.end();) it = it->first == chat ? reading.erase(it) : std::next(it);
-    for (auto it = misses.begin(); it != misses.end();) it = it->first.first == chat ? misses.erase(it) : std::next(it);
+    auto drop = [&](auto& m) {
+        for (auto it = m.begin(); it != m.end();) it = it->first == chat ? m.erase(it) : std::next(it);
+    };
+    auto drop_keyed = [&](auto& m) {
+        for (auto it = m.begin(); it != m.end();) it = it->first.first == chat ? m.erase(it) : std::next(it);
+    };
+    drop_keyed(misses);
+    drop_keyed(fetched);
+    drop(uploading);
+    drop(loading);
+    drop_keyed(ahead);
+    drop_keyed(chunks_out);
+    drop_keyed(landed);
+    drop_keyed(blobs);
 }
 
 // ---- one step's context, as engine/core.rs Cx ----
@@ -170,6 +210,7 @@ struct Engine::Cx {
     size_t max;
     const std::string& me;
     uint64_t version;
+    size_t max_file;
 
     void emit(Action a) { out.actions.push_back(std::move(a)); }
     void keep(std::string file, Bytes bytes) { out.files.push_back({std::move(file), std::move(bytes)}); }
@@ -194,32 +235,62 @@ struct Engine::Cx {
         line_changed(c, id);
         if (c.log.size() > MAX_LOG) {
             size_t n = c.log.size() - MAX_LOG;
-            for (size_t k = 0; k < n; k++) line_dropped(c, c.log[k].id);
+            for (size_t k = 0; k < n; k++) {
+                if (c.log[k].attachment) del(c.log[k].attachment->file);
+                line_dropped(c, c.log[k].id);
+            }
             c.log.erase(c.log.begin(), c.log.begin() + n);
         }
         return id;
+    }
+    void del(const std::string& file) {
+        Action a(Action::DELETE);
+        a.file = file;
+        emit(a);
     }
     void notice(Chat& c, NoticeKind kind, std::vector<std::string> args) {
         Line l;
         l.notice = Notice{kind, std::move(args)};
         say(c, std::move(l));
     }
+    // Queue outgoing, each written after the one before; line shows the one carrying content,
+    // into which the bytes of a file it carries, payload, are put. A message too long for a box
+    // goes to a substream, written before the I box naming it.
     void enqueue(Chat& c, const std::vector<Outgoing>& outgoing, const std::optional<Bytes>& content,
-                 std::optional<size_t> line) {
+                 std::optional<size_t> line, const Bytes* payload = nullptr) {
         for (auto& o : outgoing) {
             if (!c.group) continue;
             bool mine = content && o.message.content == content;
             auto b = box_of(o.message, version);
-            // shortcut: a box over the box size is refused, not sent as a chunk stream; upgrade with file sending.
-            if (b && b->size() <= max) {
+            if (b && payload && mine) {
+                auto full = put_payload(Bytes(b->begin() + 1, b->end()), *payload);
+                b = full ? std::optional<Bytes>(frame(*full)) : std::nullopt;
+            }
+            if (b) {
                 Job j;
-                j.id = c.fresh();
                 j.token = o.token;
-                j.box = *b;
                 if (mine) j.line = line;
-                c.jobs.push_back(j);
-                dirty(c);
-                continue;
+                if (b->size() <= max) {
+                    j.id = c.fresh();
+                    j.box = std::move(*b);
+                    c.jobs.push_back(std::move(j));
+                    dirty(c);
+                    continue;
+                }
+                Bytes blob(b->begin() + 1, b->end());
+                if (blob.size() <= max_file + max) {
+                    j.id = c.fresh();
+                    Upload u;
+                    u.file = "spool/" + slug(c.name) + "-" + std::to_string(now) + "-" + std::to_string(j.id) + ".cbor";
+                    u.box_size = max;
+                    u.total = chunk_count(blob.size(), max);
+                    keep(u.file, blob);
+                    flight.blobs[{c.id, j.id}] = std::move(blob);
+                    j.upload = std::move(u);
+                    c.jobs.push_back(std::move(j));
+                    dirty(c);
+                    continue;
+                }
             }
             c.group->abandoned(o.token);
             notice(c, mine ? NoticeKind::TooLong : NoticeKind::NotWritten, {});
@@ -233,12 +304,30 @@ struct Engine::Cx {
         c.jobs.push_back(j);
         dirty(c);
     }
+    // A line for content from sender, and the file it carries kept.
     void deliver(Chat& c, const Key& sender, const Index& index, const Bytes& content) {
-        // shortcut: a file shows as text_of's placeholder; upgrade with file receiving.
         Line l;
         l.sender = sender;
         l.index = index;
-        l.text = text_of(content);
+        auto g = Gcm::from_bytes(content);
+        auto f = g ? file_of(*g) : std::nullopt;
+        if (!f) {
+            l.text = text_of(content);
+            say(c, l);
+            return;
+        }
+        auto it = flight.arriving.find({sender, index});
+        if (it != flight.arriving.end()) f->payload = it->second;
+        std::string name = safe_name(f->basename);
+        Attachment a{name, f->filetype, f->payload.size(), attachment_file(c, c.next_id, now, name)};
+        if (f->payload.size() > max_file) {
+            l.text = "[file " + name + ", " + size_text(a.size) + ", too large to keep]";
+            say(c, l);
+            return;
+        }
+        keep(a.file, std::move(f->payload));
+        l.text = file_text(a);
+        l.attachment = std::move(a);
         say(c, l);
     }
     template <class Keep>
@@ -246,8 +335,9 @@ struct Engine::Cx {
         size_t before = c.log.size();
         std::vector<Line> kept;
         for (auto& l : c.log) {
-            if (keep(l)) kept.push_back(l);
-            else line_dropped(c, l.id);
+            if (keep(l)) { kept.push_back(l); continue; }
+            if (l.attachment) del(l.attachment->file);
+            line_dropped(c, l.id);
         }
         c.log = kept;
         if (c.log.size() != before) dirty(c);
@@ -321,6 +411,9 @@ struct Engine::Cx {
         for (auto& [stream, read_cap, next] : rs) {
             auto k = std::make_pair(c.id, stream);
             if (flight.reading.count(k)) continue;
+            bool fetching = false;
+            for (auto& d : c.downloads) fetching |= d.stream == stream;
+            if (fetching) continue;
             Index at;
             if (auto cur = c.cursors.get(stream)) {
                 at = *cur;
@@ -341,6 +434,7 @@ struct Engine::Cx {
     void start_write(Chat& c) {
         if (flight.writing.count(c.id) || c.write_cap.empty() || c.jobs.empty()) return;
         if (c.inducting && c.inducting->sealing) return;
+        if (c.jobs[0].upload && c.jobs[0].upload->sent < c.jobs[0].upload->total) return;
         if (!c.jobs[0].index) {
             c.jobs[0].index = c.next_write;
             dirty(c);
@@ -374,6 +468,73 @@ struct Engine::Cx {
         i.sealing = true;
         dirty(c);
     }
+    // Write the next boxes of each upload, making its substream, reading its message back and
+    // deriving their indexes first.
+    void start_uploads(Chat& c) {
+        for (auto& j : c.jobs) {
+            if (!j.upload) continue;
+            Upload& u = *j.upload;
+            JobKey key{c.id, j.id};
+            if (u.sent >= u.total || flight.uploading.count(key)) continue;
+            Action a(Action::SUBSTREAM);
+            a.chat = c.id;
+            a.job = j.id;
+            if (u.write_cap.empty()) {
+                flight.uploading.insert(key);
+                emit(a);
+                continue;
+            }
+            auto blob = flight.blobs.find(key);
+            if (blob == flight.blobs.end()) {
+                a.kind = Action::LOAD;
+                a.file = u.file;
+                if (flight.loading.insert(key).second) emit(a);
+                continue;
+            }
+            size_t want = std::min(WINDOW, u.total - u.sent);
+            auto& ahead = flight.ahead[key];
+            if (ahead.size() < want) {
+                flight.uploading.insert(key);
+                a.kind = Action::CHUNK_INDEXES;
+                a.start = u.next;
+                a.count = std::min(2 * WINDOW, u.total - u.sent) - 1;
+                emit(a);
+                continue;
+            }
+            auto& out = flight.chunks_out[key];
+            auto& landed = flight.landed[key];
+            for (size_t i = 0; i < want; i++) {
+                size_t n = u.sent + i;
+                bool there = out.count(n);
+                for (auto& l : landed) there |= l.first == n;
+                if (there) continue;
+                out.insert(n);
+                Action w(Action::WRITE_CHUNK);
+                w.chat = c.id;
+                w.job = j.id;
+                w.n = n;
+                w.write_cap = u.write_cap;
+                w.index = ahead[i];
+                w.box = substream_box(blob->second, u.box_size, n);
+                emit(std::move(w));
+            }
+        }
+    }
+    // Read the next box of each download.
+    void start_downloads(Chat& c) {
+        for (auto& d : c.downloads) {
+            StreamKey k{c.id, d.stream};
+            if (flight.reading.count(k)) continue;
+            auto f = flight.fetched.find(k);
+            flight.reading.insert(k);
+            Action a(Action::READ_CHUNK);
+            a.chat = c.id;
+            a.stream = d.stream;
+            a.read_cap = d.read_cap;
+            a.index = f == flight.fetched.end() ? start_of(d.read_cap) : f->second.first;
+            emit(std::move(a));
+        }
+    }
     void stop_reading(const Chat& c, const Key& stream) { flight.reading.erase({c.id, stream}); }
     size_t missed(const Chat& c, const Key& stream) { return flight.misses[{c.id, stream}]++; }
     void hit(const Chat& c, const Key& stream) { flight.misses.erase({c.id, stream}); }
@@ -385,6 +546,83 @@ struct Engine::Cx {
         if (counter(*at) < counter(r->next)) {
             c.cursors.insert(stream, r->next);
             dirty(c);
+        }
+    }
+    // A download is over: tell the member what came of it, in its place in the stream.
+    void finish(Chat& c, Download d, std::optional<Bytes> blob) {
+        flight.fetched.erase({c.id, d.stream});
+        c.downloads.erase(std::remove_if(c.downloads.begin(), c.downloads.end(),
+                                         [&](const Download& x) { return x.stream == d.stream; }),
+                          c.downloads.end());
+        dirty(c);
+        std::optional<Bytes> without;
+        if (blob) {
+            if (auto t = take_payload(*blob)) {
+                flight.arriving.clear();
+                flight.arriving[{d.stream, d.index}] = std::move(t->second);
+                without = std::move(t->first);
+            } else {
+                without = std::move(blob);
+            }
+        }
+        auto m = without ? message_from_cbor(*without) : std::nullopt;
+        if (m) remark(c, d.stream, frame(*without));
+        else notice(c, NoticeKind::NotFetched, {label(c, d.stream)});
+        if (c.group) effects(c, c.group->observe(d.stream, d.index, m, d.next));
+        flight.arriving.clear();
+    }
+    void wrote_chunk(Chat& c, size_t job, size_t n, const Index& next) {
+        JobKey key{c.id, job};
+        auto out = flight.chunks_out.find(key);
+        if (out != flight.chunks_out.end()) out->second.erase(n);
+        Job* j = c.job(job);
+        if (!j || !j->upload) return;
+        Upload& u = *j->upload;
+        if (n < u.sent) return;
+        auto& landed = flight.landed[key];
+        landed.push_back({n, next});
+        // Count the boxes written in a row from the first not yet counted.
+        for (;;) {
+            auto it = std::find_if(landed.begin(), landed.end(), [&](auto& l) { return l.first == u.sent; });
+            if (it == landed.end()) break;
+            Index after = std::move(it->second);
+            landed.erase(it);
+            auto a = flight.ahead.find(key);
+            if (a != flight.ahead.end() && !a->second.empty()) a->second.erase(a->second.begin());
+            u.sent++;
+            u.next = std::move(after);
+        }
+        bool done = u.sent >= u.total;
+        if (done) j->box = indirection(u.total, Bytes(u.write_cap.begin() + KEY_SIZE, u.write_cap.end()));
+        dirty(c);
+        if (done) {
+            flight.blobs.erase(key);
+            flight.ahead.erase(key);
+            flight.landed.erase(key);
+            del(u.file);
+        }
+    }
+    void read_chunk(Chat& c, const Key& stream, const Index& index, const Outcome& outcome) {
+        stop_reading(c, stream);
+        auto di = std::find_if(c.downloads.begin(), c.downloads.end(), [&](const Download& d) { return d.stream == stream; });
+        if (di == c.downloads.end()) return;
+        Download d = *di;
+        StreamKey k{c.id, stream};
+        auto f = flight.fetched.find(k);
+        if ((f == flight.fetched.end() ? start_of(d.read_cap) : f->second.first) != index) return;
+        if (outcome.kind == Outcome::NOT_FOUND) { wake(c, stream); return; }
+        if (outcome.kind == Outcome::TOMBSTONE) { finish(c, d, std::nullopt); return; }
+        hit(c, stream);
+        std::vector<Bytes> parts;
+        if (f != flight.fetched.end()) parts = std::move(f->second.second);
+        uint8_t tag = outcome.plaintext.empty() ? 0 : outcome.plaintext[0];
+        parts.push_back(outcome.plaintext);
+        if (tag == 'F') {
+            finish(c, d, assemble(parts));
+        } else if (tag == 'C' && parts.size() < max_chunks(max, max_file) && (!d.total || parts.size() < *d.total)) {
+            flight.fetched[k] = {outcome.next, std::move(parts)};
+        } else {
+            finish(c, d, std::nullopt);
         }
     }
     void cancel_held(Chat& c) {
@@ -413,9 +651,15 @@ struct Engine::Cx {
             return;
         }
         dirty(c);
-        if (unframe(outcome.plaintext).kind == Chunk::INDIRECTION) {
-            // shortcut: a long message's chunk stream is stepped past, as the spec allows; upgrade with file receiving.
-            notice(c, NoticeKind::NotFetched, {label(c, stream)});
+        auto ch = unframe(outcome.plaintext);
+        if (ch.kind == Chunk::INDIRECTION) {
+            if (ch.total.value_or(0) <= max_chunks(max, max_file)) {
+                c.downloads.push_back({stream, index, outcome.next, ch.data,
+                                       ch.total ? std::optional<size_t>(*ch.total) : std::nullopt});
+                c.cursors.insert(stream, outcome.next);
+                return;
+            }
+            notice(c, NoticeKind::FileTooLargeToFetch, {label(c, stream)});
             if (c.group) effects(c, c.group->observe(stream, index, std::nullopt, outcome.next));
             c.cursors.insert(stream, outcome.next);
             return;
@@ -439,11 +683,13 @@ static std::optional<std::pair<Group, ReplyWho>> joined_from(const Opened& o) {
 }
 
 void Engine::pump(StepResult& out, int64_t now) {
-    Cx cx{out, flight_, now, max_plaintext, state.me, wire_version};
+    Cx cx{out, flight_, now, max_plaintext, state.me, wire_version, max_file};
     for (auto& c : state.chats) {
         cx.start_write(c);
         cx.start_reads(c);
         cx.start_induction(c);
+        cx.start_uploads(c);
+        cx.start_downloads(c);
     }
 }
 
@@ -510,7 +756,7 @@ StepResult Engine::resume(int64_t now) {
 
 void Engine::handle(StepResult& out, int64_t now, const Input& input) {
     const std::string me = state.me;
-    Cx cx{out, flight_, now, max_plaintext, me, wire_version};
+    Cx cx{out, flight_, now, max_plaintext, me, wire_version, max_file};
     switch (input.kind) {
         case Input::CREATE:
         case Input::JOIN: {
@@ -535,6 +781,7 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
         case Input::LEAVE: {
             auto it = std::find_if(state.chats.begin(), state.chats.end(), [&](const Chat& c) { return c.id == input.chat; });
             if (it == state.chats.end()) return;
+            for (auto& f : it->files()) cx.del(f);
             state.chats.erase(it);
             flight_.forget(input.chat);
             out.changes.chats.erase(input.chat);
@@ -574,6 +821,8 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
     }
     const ChatId& id = input.chat;
     if (input.kind == Input::WROTE) flight_.writing.erase(id);
+    if (input.kind == Input::LOADED) flight_.loading.erase({id, input.job});
+    if (input.kind == Input::SUBSTREAM || input.kind == Input::CHUNK_INDEXES) flight_.uploading.erase({id, input.job});
     if (input.kind == Input::WAKE) {
         flight_.reading.erase({id, input.stream});
         return;
@@ -581,7 +830,9 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
     Chat* cp = state.chat(id);
     if (!cp) return;
     Chat& c = *cp;
-    if (input.kind != Input::READ) cx.dirty(c);
+    if (input.kind != Input::READ && input.kind != Input::READ_CHUNK && input.kind != Input::CHUNK_INDEXES &&
+        input.kind != Input::WROTE_CHUNK)
+        cx.dirty(c);
     switch (input.kind) {
         case Input::CREATED: {
             c.write_cap = input.keypair.write_cap;
@@ -722,6 +973,63 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             cx.enqueue(c, outg, content, line);
             return;
         }
+        case Input::SEND_FILE: {
+            if (!c.group) {
+                cx.notice(c, NoticeKind::NotJoined, {});
+                return;
+            }
+            static const Bytes none;
+            const Bytes& bytes = input.bytes ? *input.bytes : none;
+            if (bytes.size() > max_file) {
+                cx.notice(c, NoticeKind::FileTooLarge, {size_text(max_file)});
+                return;
+            }
+            std::string safe = safe_name(input.name);
+            FileUpload f{{}, filetype_of(safe), safe};
+            Bytes content = file_content(c.group->membership(nullptr), f, wire_version);
+            Attachment a{safe, f.filetype, bytes.size(), attachment_file(c, c.next_id, now, safe)};
+            cx.keep(a.file, bytes);
+            Line l;
+            l.sender = c.group->me();
+            l.text = file_text(a);
+            l.status = Status::Pending;
+            l.attachment = std::move(a);
+            size_t line = cx.say(c, l);
+            auto outg = c.group->compose(content);
+            cx.enqueue(c, outg, content, line, &bytes);
+            return;
+        }
+        case Input::LOADED: {
+            Job* j = c.job(input.job);
+            if (!j) return;
+            if (input.bytes) {
+                flight_.blobs[{id, input.job}] = *input.bytes;
+                return;
+            }
+            if (j->token && c.group) c.group->abandoned(*j->token);
+            c.jobs.erase(c.jobs.begin() + (j - c.jobs.data()));
+            cx.notice(c, NoticeKind::SendLost, {});
+            return;
+        }
+        case Input::SUBSTREAM: {
+            Job* j = c.job(input.job);
+            if (j && j->upload) {
+                j->upload->write_cap = input.keypair.write_cap;
+                j->upload->next = input.keypair.first;
+            }
+            return;
+        }
+        case Input::CHUNK_INDEXES: {
+            Job* j = c.job(input.job);
+            if (j && j->upload && j->upload->next == input.index) {
+                std::vector<Index> a{input.index};
+                a.insert(a.end(), input.indexes.begin(), input.indexes.end());
+                flight_.ahead[{id, input.job}] = std::move(a);
+            }
+            return;
+        }
+        case Input::WROTE_CHUNK: cx.wrote_chunk(c, input.job, input.n, input.next); return;
+        case Input::READ_CHUNK: cx.read_chunk(c, input.stream, input.index, input.outcome); return;
         case Input::WROTE: {
             auto it = std::find_if(c.jobs.begin(), c.jobs.end(), [&](const Job& j) { return j.id == input.job; });
             if (it == c.jobs.end()) return;
@@ -762,8 +1070,12 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             c.group->remove(input.who);
             cx.stop_reading(c, input.who);
             cx.hit(c, input.who);
+            flight_.fetched.erase({id, input.who});
             cx.drop_lines(c, [&](const Line& x) { return x.sender != input.who; });
             c.cursors.shift_remove(input.who);
+            c.downloads.erase(std::remove_if(c.downloads.begin(), c.downloads.end(),
+                                             [&](const Download& d) { return d.stream == input.who; }),
+                              c.downloads.end());
             cx.notice(c, NoticeKind::StoppedReading, {l});
             return;
         }
@@ -847,7 +1159,9 @@ Backend::Write Executor::publish(const Bytes& write_cap, const Index& index, con
 Done Executor::perform(const Action& a) {
     if (auto d = perform_or(a)) return *d;
     switch (a.kind) {
-        case Action::READ: case Action::SCAN_READ: case Action::WRITE: case Action::DERIVE: case Action::WALK: {
+        case Action::DELETE: return Done{};
+        case Action::READ: case Action::SCAN_READ: case Action::WRITE: case Action::DERIVE: case Action::WALK:
+        case Action::READ_CHUNK: case Action::SUBSTREAM: case Action::CHUNK_INDEXES: case Action::WRITE_CHUNK: {
             Done d;
             d.kind = Done::RETRY;
             d.action = a;
@@ -890,6 +1204,56 @@ std::optional<Done> Executor::perform_or(const Action& a) {
             auto r = b.read_box(a.read_cap, a.index);
             if (!r) return std::nullopt;
             Input i(a.kind == Action::READ ? Input::READ : Input::SCAN_READ);
+            i.chat = a.chat;
+            i.stream = a.stream;
+            i.index = a.index;
+            i.outcome = outcome_of(*r, a.index);
+            return done(i);
+        }
+        case Action::DELETE:
+            if (!files.remove) return std::nullopt;
+            files.remove(a.file);
+            return Done{};
+        case Action::LOAD: {
+            Input i(Input::LOADED);
+            i.chat = a.chat;
+            i.job = a.job;
+            if (files.read) i.bytes = files.read(a.file);
+            return done(i);
+        }
+        case Action::SUBSTREAM: {
+            auto kp = b.new_keypair();
+            if (!kp) return std::nullopt;
+            Input i(Input::SUBSTREAM);
+            i.chat = a.chat;
+            i.job = a.job;
+            i.keypair = *kp;
+            return done(i);
+        }
+        case Action::WRITE_CHUNK: {
+            auto w = b.write_box(a.write_cap, a.index, a.box);
+            if (w == Backend::Write::FAILED) return std::nullopt;
+            Input i(w == Backend::Write::EXISTS ? Input::REFUSED : Input::WROTE_CHUNK);
+            i.chat = a.chat;
+            i.job = a.job;
+            i.n = a.n;
+            i.next = *next_index(a.index);
+            return done(i);
+        }
+        case Action::CHUNK_INDEXES: {
+            auto is = derive_with(a.start, a.count);
+            if (!is) return std::nullopt;
+            Input i(Input::CHUNK_INDEXES);
+            i.chat = a.chat;
+            i.job = a.job;
+            i.index = a.start;
+            i.indexes = *is;
+            return done(i);
+        }
+        case Action::READ_CHUNK: {
+            auto r = b.read_box(a.read_cap, a.index);
+            if (!r) return std::nullopt;
+            Input i(Input::READ_CHUNK);
             i.chat = a.chat;
             i.stream = a.stream;
             i.index = a.index;

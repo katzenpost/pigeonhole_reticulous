@@ -133,7 +133,8 @@ struct Sim : Backend {
 
 static std::string kind_of(const Action& a) {
     static const char* names[] = {"Create", "Write", "Read", "Wake", "ScanRead", "Walk", "Derive", "Mint", "AwaitReply",
-                                  "ReadVoucher", "Seal", "Publish"};
+                                  "ReadVoucher", "Seal", "Publish", "Delete", "Load", "Substream", "WriteChunk",
+                                  "ChunkIndexes", "ReadChunk"};
     return names[a.kind];
 }
 
@@ -143,6 +144,7 @@ struct Client {
     // What it saves after every step, which must load back as the state it has.
     std::shared_ptr<std::map<std::string, std::string>> files = std::make_shared<std::map<std::string, std::string>>();
     std::shared_ptr<kq::Store> store = std::make_shared<kq::Store>(kq::memory_files(*files));
+    std::shared_ptr<std::map<std::string, Bytes>> kept = std::make_shared<std::map<std::string, Bytes>>();  // its files
 };
 
 static int g_saved = 0, g_unsaved = 0;
@@ -178,6 +180,7 @@ struct World {
         bool same = kq::state_dump(fresh.load(m.name, &problems)) == kq::state_dump(m.eng.state) && problems.empty();
         (same ? g_saved : g_unsaved)++;
         if (!same) fprintf(stderr, "%s: the saved state differs from the state after a step\n", m.name.c_str());
+        for (auto& f : res.files) (*m.kept)[f.file] = f.bytes;
         for (auto& a : res.actions) queue.push_back({i, a});
     }
     bool act() {
@@ -185,7 +188,12 @@ struct World {
         if (it == queue.end()) return false;
         auto [w, a] = *it;
         queue.erase(it);
-        Executor x{sim, [](uint64_t) {}};
+        auto kept = members[w].kept;
+        Executor x{sim, [](uint64_t) {}, {[kept](const std::string& f) -> std::optional<Bytes> {
+                                              auto it = kept->find(f);
+                                              return it == kept->end() ? std::nullopt : std::optional<Bytes>(it->second);
+                                          },
+                                          [kept](const std::string& f) { kept->erase(f); }}};
         std::string kind = kind_of(a);
         Done o = x.perform(a);
         if (o.kind == Done::DONE && delay_next.count(w) && delay_next[w] == kind) {
@@ -424,6 +432,186 @@ static std::string run_script(const std::string& script) {
     return s;
 }
 
+// ---- files, as rust/tests/katzenqt1_client_core.rs ----
+
+static Bytes bytes_of(size_t n, size_t seed) {
+    Bytes b(n);
+    for (size_t i = 0; i < n; i++) b[i] = (uint8_t)((i * 31 + seed) % 251);
+    return b;
+}
+
+static void found_and_join(World& w) {
+    w.command({"create", "alice", "g"});
+    w.command({"join", "bob", "g"});
+    w.run_to(w.clock + 600000);
+    w.command({"invite", "alice", "g", "bob"});
+    w.run_to(w.clock + 600000);
+}
+
+static void send_file(World& w, size_t i, const std::string& name, Bytes bytes) {
+    Input x(Input::SEND_FILE);
+    x.chat = "g";
+    x.name = name;
+    x.bytes = std::move(bytes);
+    w.feed(i, x);
+}
+
+static const Attachment* attachment(const World& w, size_t i, const std::string& name) {
+    auto c = w.chat(i, "g");
+    if (c) for (auto& l : c->log) if (l.attachment && l.attachment->name == name) return &*l.attachment;
+    return nullptr;
+}
+
+static std::optional<Bytes> file(const World& w, size_t i, const std::string& name) {
+    auto a = attachment(w, i, name);
+    if (!a) return std::nullopt;
+    auto it = w.members[i].kept->find(a->file);
+    return it == w.members[i].kept->end() ? std::nullopt : std::optional<Bytes>(it->second);
+}
+
+static bool says(const World& w, size_t i, const std::string& text) {
+    auto c = w.chat(i, "g");
+    if (c) for (auto& l : c->log) if (!l.notice && l.text == text) return true;
+    return false;
+}
+
+static bool noticed(const World& w, size_t i, const std::string& text) {
+    auto c = w.chat(i, "g");
+    if (c) for (auto& l : c->log) if (l.notice && plain(*l.notice).find(text) != std::string::npos) return true;
+    return false;
+}
+
+static size_t spooled(const World& w, size_t i) {
+    size_t n = 0;
+    for (auto& [f, _] : *w.members[i].kept) n += f.compare(0, 6, "spool/") == 0;
+    return n;
+}
+
+// The boxes of the substream an I box in alice's stream names, in order, as the sim holds them.
+static std::vector<Bytes> substream_of(const World& w, const Bytes& ibox) {
+    auto ch = unframe(ibox);
+    std::vector<Bytes> out;
+    Bytes key(ch.data.begin(), ch.data.begin() + KEY_SIZE);
+    Index at = start_of(ch.data);
+    for (size_t n = 0; n < ch.total.value_or(0); n++) {
+        auto it = w.sim.boxes.find({key, at});
+        if (it == w.sim.boxes.end()) return {};
+        out.push_back(it->second.second);
+        at = *next_index(at);
+    }
+    return out;
+}
+
+static void file_tests(const char* out_path) {
+    Vec v{"client", "files", {}};
+    {
+        World w;
+        found_and_join(w);
+        std::string text;
+        for (int i = 0; i < 400; i++) text += "a long message ";
+        Input x(Input::SEND);
+        x.chat = "g";
+        x.text = text;
+        w.feed(0, x);
+        x.text = "after it";
+        w.feed(0, x);
+        w.run_to(w.clock + 600000);
+        auto& log = w.chat(1, "g")->log;
+        check(log.size() >= 2 && log[log.size() - 2].text == text && log.back().text == "after it", v,
+              "a long message, then one after it, in order");
+    }
+    {
+        World w;
+        found_and_join(w);
+        Bytes pic = bytes_of(20000, 7);
+        send_file(w, 0, "cat.png", pic);
+        bool pending = false;
+        for (auto& l : w.chat(0, "g")->log) pending |= l.attachment && l.status == Status::Pending;
+        check(pending && spooled(w, 0) == 1, v, "a file sent shows pending, its message spooled");
+        w.run_to(w.clock + 600000);
+        auto a = attachment(w, 1, "cat.png");
+        check(a && a->filetype == "image/png" && a->size == 20000 && file(w, 1, "cat.png") == pic, v,
+              "an image in 14 chunks arrives whole");
+        check(file(w, 0, "cat.png") == pic && w.chat(0, "g")->jobs.empty() && spooled(w, 0) == 0, v,
+              "the sender keeps its copy, and the spool is emptied");
+        check(says(w, 1, "[file cat.png, 20 KB]"), v, "the line names it");
+        // What the C++ engine wrote, for pigeonhole_protocols to read (filevec read).
+        if (out_path) {
+            Bytes ibox;
+            for (auto& [k, b] : w.sim.boxes)
+                if (!b.second.empty() && b.second[0] == 'I') ibox = b.second;
+            auto chunks = substream_of(w, ibox);
+            check(chunks.size() == 14, v, "the substream as written");
+            std::vector<Json> cs;
+            for (auto& c : chunks) cs.push_back(Json::str(tohex(c)));
+            auto ch = unframe(ibox);
+            Json vec = Json::obj({{"name", Json::str("C++ engine: cat.png in 14 chunks")},
+                                  {"filetype", Json::str("image/png")}, {"basename", Json::str("cat.png")},
+                                  {"payload", Json::str(tohex(pic))}, {"chunks", Json::arr(cs)},
+                                  {"indirection", Json::str(tohex(ibox))}, {"read_cap", Json::str(tohex(ch.data))}});
+            FILE* f = fopen(out_path, "w");
+            if (f) {
+                fprintf(f, "%s\n", Json::obj({{"vectors", Json::arr({vec})}}).dump().c_str());
+                fclose(f);
+            }
+        }
+    }
+    {
+        World w;
+        found_and_join(w);
+        Bytes doc = bytes_of(30000, 5);
+        send_file(w, 0, "big.bin", doc);
+        auto out = [&] {
+            size_t n = 0;
+            for (auto& q : w.queue) n += q.second.kind == Action::WRITE_CHUNK;
+            return n;
+        };
+        for (int k = 0; k < 1000 && out() < WINDOW; k++) if (!w.act()) w.run_to(w.clock + 1000);
+        check(out() == WINDOW, v, "a window of chunks written at once");
+        std::reverse(w.queue.begin(), w.queue.end());
+        w.run_to(w.clock + 600000);
+        check(file(w, 1, "big.bin") == doc, v, "chunks landing out of order");
+    }
+    {
+        World w;
+        found_and_join(w);
+        Bytes doc = bytes_of(30000, 9);
+        send_file(w, 0, "restart.bin", doc);
+        for (int k = 0; k < 6; k++) w.act();
+        // A restart: what was under way is lost, the state is what was saved.
+        auto& m = w.members[0];
+        w.queue.erase(std::remove_if(w.queue.begin(), w.queue.end(), [](auto& q) { return q.first == 0; }), w.queue.end());
+        w.later.erase(std::remove_if(w.later.begin(), w.later.end(), [](auto& l) { return l.who == 0; }), w.later.end());
+        m.eng = Engine(kq::Store(kq::memory_files(*m.files)).load(m.name), 1530);
+        w.release(0, m.eng.resume(0));
+        w.run_to(w.clock + 600000);
+        check(file(w, 1, "restart.bin") == doc && spooled(w, 0) == 0, v, "an upload goes on after a restart");
+    }
+    {
+        World w;
+        found_and_join(w);
+        send_file(w, 0, "huge.bin", Bytes(MAX_FILE + 1));
+        check(noticed(w, 0, "that file is too large to send: at most 16.0 MB"), v, "a file too large to send");
+        w.members[1].eng.max_file = 10000;
+        send_file(w, 0, "big.bin", bytes_of(30000, 1));
+        send_file(w, 0, "a.png", bytes_of(500, 7));
+        w.run_to(w.clock + 600000);
+        check(noticed(w, 1, "sent a file too large to fetch") && !file(w, 1, "big.bin"), v,
+              "a file past the reader's limit is not fetched");
+        check(file(w, 1, "a.png") == bytes_of(500, 7), v, "and what follows it is read");
+        std::string a = attachment(w, 1, "a.png")->file;
+        Input rm(Input::REMOVE_MEMBER);
+        rm.chat = "g";
+        rm.who = w.chat(0, "g")->group->me();
+        w.feed(1, rm);
+        w.run_to(w.clock + 600000);
+        check(!w.members[1].kept->count(a), v, "a removed member's files are deleted");
+        w.command({"leave", "alice", "g"});
+        w.run_to(w.clock + 600000);
+        check(w.members[0].kept->empty(), v, "leaving deletes every file");
+    }
+}
+
 int main() {
     if (sodium_init() < 0) return 2;
     const char* env = getenv("KQ1_TESTDATA");
@@ -459,6 +647,7 @@ int main() {
             check(false, s, "runs");
         }
     }
+    file_tests(getenv("KQ_FILES_OUT"));
     check(g_unsaved == 0 && g_saved > 0, v, "every step's state is saved");
     printf("client: %d steps saved and loaded back\n", g_saved);
     return finish("client");

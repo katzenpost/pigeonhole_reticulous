@@ -133,6 +133,32 @@ struct Chunk {
 Bytes frame(const Bytes& cbor);
 Chunk unframe(const Bytes& b);
 
+// ---- files, as wire/files.rs ----
+
+constexpr size_t MAX_FILE = 16 * 1024 * 1024;
+
+struct FileUpload {
+    Bytes payload;
+    std::string filetype, basename;  // filetype: image/png, audio/opus or arbitrary, as katzenqt tags it
+    Bytes to_bytes() const;          // the map form, as a Gcm keeps it
+    static std::optional<FileUpload> from_bytes(const Bytes& raw);
+};
+std::optional<FileUpload> file_of(const Gcm& g);
+Bytes file_content(const Bytes& membership_hash, const FileUpload& f, uint64_t version);
+std::string safe_name(const std::string& name);
+const char* filetype_of(const std::string& name);
+// A message with the file's bytes taken out, and the bytes; and the reverse.
+std::optional<std::pair<Bytes, Bytes>> take_payload(const Bytes& cbor);
+std::optional<Bytes> put_payload(const Bytes& cbor, const Bytes& payload);
+// A message too long for a box of max bytes goes to a substream: C boxes, then an F box.
+inline size_t chunk_count(size_t n, size_t max) { return (n + (max - 2)) / (max - 1); }
+inline size_t max_chunks(size_t max, size_t max_file = MAX_FILE) { return chunk_count(max_file + max, max); }
+Bytes substream_box(const Bytes& blob, size_t max, size_t i);
+// The I box naming a substream of total boxes.
+Bytes indirection(size_t total, const Bytes& read_cap);
+// The message a substream's boxes hold, once its F box is among them.
+std::optional<Bytes> assemble(const std::vector<Bytes>& boxes);
+
 // ---- ReplyWho ----
 
 struct Member { Bytes read_cap, start; };

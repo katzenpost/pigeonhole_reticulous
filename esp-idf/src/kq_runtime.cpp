@@ -11,6 +11,7 @@ namespace kq {
 
 void Runtime::release(const kq1::StepResult& r) {
     steps++;
+    if (on_file) for (auto& f : r.files) on_file(f);
     for (auto& a : r.actions) ready_.push_back(a);
     if (on_changes && !r.changes.empty()) on_changes(r.changes);
 }

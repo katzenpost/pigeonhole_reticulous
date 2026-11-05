@@ -28,13 +28,27 @@ std::string base(const ChatId& id) {
 
 Json text(const std::string& s) { return Json::str(s); }
 
+// Fields added since the first saved records: absent, they read as none.
+const Json* opt(const Json& j, const char* k) {
+    auto it = j.o.find(k);
+    return it == j.o.end() || it->second.is_null() ? nullptr : &it->second;
+}
+
 Json chat_json(const Chat& c) {
-    std::vector<Json> cursors, names, jobs;
+    std::vector<Json> cursors, names, jobs, downloads;
     for (auto& [k, v] : c.cursors) cursors.push_back(Json::arr({h(k), h(v)}));
     for (auto& [k, v] : c.names) names.push_back(Json::arr({h(k), text(v)}));
-    for (auto& j : c.jobs)
+    for (auto& j : c.jobs) {
+        Json up;
+        if (auto& u = j.upload)
+            up = Json::obj({{"file", text(u->file)}, {"box_size", nu(u->box_size)}, {"total", nu(u->total)},
+                            {"write_cap", h(u->write_cap)}, {"sent", nu(u->sent)}, {"next", h(u->next)}});
         jobs.push_back(Json::obj({{"id", nu(j.id)}, {"token", on(j.token)}, {"index", oh(j.index)}, {"box", h(j.box)},
-                                  {"line", on(j.line)}}));
+                                  {"line", on(j.line)}, {"upload", up}}));
+    }
+    for (auto& d : c.downloads)
+        downloads.push_back(Json::obj({{"stream", h(d.stream)}, {"index", h(d.index)}, {"next", h(d.next)},
+                                       {"read_cap", h(d.read_cap)}, {"total", on(d.total)}}));
     Json joining, inducting;
     if (auto& j = c.joining)
         joining = Json::obj({{"code", text(j->code)}, {"secret_key", h(j->secret_key)},
@@ -51,7 +65,8 @@ Json chat_json(const Chat& c) {
     return Json::obj({{"id", text(c.id)}, {"name", text(c.name)}, {"write_cap", h(c.write_cap)},
                       {"next_write", h(c.next_write)}, {"group", c.group ? group_j(*c.group) : Json{}},
                       {"cursors", Json::arr(cursors)}, {"names", Json::arr(names)}, {"jobs", Json::arr(jobs)},
-                      {"joining", joining}, {"inducting", inducting}, {"next_id", nu(c.next_id)}});
+                      {"joining", joining}, {"inducting", inducting}, {"next_id", nu(c.next_id)},
+                      {"downloads", Json::arr(downloads)}});
 }
 
 std::string str(const Json& j) {
@@ -69,9 +84,18 @@ Chat chat_of(const Json& j) {
     if (!get(j, "group").is_null()) c.group = read_group(j["group"]);
     each_pair(get(j, "cursors"), [&](const Json& k, const Json& v) { c.cursors.insert(b(k), b(v)); });
     each_pair(get(j, "names"), [&](const Json& k, const Json& v) { c.names.insert(b(k), str(v)); });
-    for (auto& x : arr(get(j, "jobs")))
-        c.jobs.push_back(Job{(size_t)u(get(x, "id")), ous(get(x, "token")), ob(get(x, "index")), b(get(x, "box")),
-                             ous(get(x, "line"))});
+    for (auto& x : arr(get(j, "jobs"))) {
+        Job jb{(size_t)u(get(x, "id")), ous(get(x, "token")), ob(get(x, "index")), b(get(x, "box")), ous(get(x, "line")),
+               std::nullopt};
+        if (auto up = opt(x, "upload"))
+            jb.upload = Upload{str(get(*up, "file")), (size_t)u(get(*up, "box_size")), (size_t)u(get(*up, "total")),
+                               b(get(*up, "write_cap")), (size_t)u(get(*up, "sent")), b(get(*up, "next"))};
+        c.jobs.push_back(std::move(jb));
+    }
+    if (auto ds = opt(j, "downloads"))
+        for (auto& d : arr(*ds))
+            c.downloads.push_back(Download{b(get(d, "stream")), b(get(d, "index")), b(get(d, "next")),
+                                           b(get(d, "read_cap")), ous(get(d, "total"))});
     if (auto& jn = get(j, "joining"); !jn.is_null())
         c.joining = Joining{str(get(jn, "code")), b(get(jn, "secret_key")), b(get(jn, "voucher_read_cap")),
                             b(get(jn, "box1")), (uint8_t)u(get(jn, "version"))};
@@ -93,9 +117,14 @@ Json line_json(const Line& l) {
         for (auto& a : l.notice->args) args.push_back(text(a));
         notice = Json::obj({{"kind", nu((unsigned)l.notice->kind)}, {"args", Json::arr(args)}});
     }
+    Json att;
+    if (auto& a = l.attachment)
+        att = Json::obj({{"name", text(a->name)}, {"filetype", text(a->filetype)}, {"size", nu(a->size)},
+                         {"file", text(a->file)}});
     return Json::obj({{"id", nu(l.id)}, {"sender", h(l.sender)}, {"index", h(l.index)}, {"text", text(l.text)},
                       {"notice", notice}, {"status", Json::boolean(l.status == Status::Pending)},
-                      {"idx64", l.idx64 ? nu(*l.idx64) : Json{}}, {"time", Json::neg(l.time)}});
+                      {"idx64", l.idx64 ? nu(*l.idx64) : Json{}}, {"time", Json::neg(l.time)},
+                      {"attachment", att}});
 }
 
 Line line_of(const Json& j) {
@@ -116,6 +145,9 @@ Line line_of(const Json& j) {
     auto& t = get(j, "time");
     if (t.kind != Json::NUM) throw Bad("time");
     l.time = std::stoll(t.s);
+    if (auto a = opt(j, "attachment"))
+        l.attachment = Attachment{str(get(*a, "name")), str(get(*a, "filetype")), (size_t)u(get(*a, "size")),
+                                  str(get(*a, "file"))};
     return l;
 }
 
