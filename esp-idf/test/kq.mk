@@ -29,7 +29,7 @@ QR_O := $(B)/qr/qrcodegen.o
 KQ_SRC := $(filter-out $(ROOT)/src/kq_service.cpp,$(wildcard $(ROOT)/src/*.cpp))
 KQ_O := $(patsubst $(ROOT)/src/%.cpp,$(B)/kq/%.o,$(KQ_SRC))
 # The voice slice's parts that need no lxst (conditional/lxst/, built on a device only with it).
-VOICE_SRC := $(wildcard $(ROOT)/conditional/lxst/src/kq_ogg.cpp)
+VOICE_SRC := $(wildcard $(ROOT)/conditional/lxst/src/kq_ogg.cpp $(ROOT)/conditional/lxst/src/kq_radio_feed.cpp)
 VOICE_O := $(patsubst $(ROOT)/conditional/lxst/src/%.cpp,$(B)/voice/%.o,$(VOICE_SRC))
 
 ifdef MBEDTLS_DIR

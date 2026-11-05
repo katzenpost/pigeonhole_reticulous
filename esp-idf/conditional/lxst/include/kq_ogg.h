@@ -19,4 +19,12 @@ struct Opus {
 // short, or no OpusHead.
 std::optional<Opus> demux(const uint8_t* b, size_t n);
 
+// An Ogg Opus stream of these packets: OpusHead and OpusTags pages, then audio pages of up to
+// 50 packets, the last marked end of stream, granule positions counted at 48 kHz.
+Bytes mux(const Opus& o, uint32_t serial);
+
+// How long one raw Opus packet plays, from its TOC byte (RFC 6716 3.1), in microseconds; 0 for
+// an empty packet or a code 3 one without its count byte.
+uint32_t packet_us(const Bytes& p);
+
 }  // namespace kq::ogg
