@@ -285,7 +285,7 @@ static void onCmd(const char* key, const char* val) {
     size_t bar = v.find('|');
     std::string group = v.substr(0, bar), arg = bar == std::string::npos ? "" : v.substr(bar + 1);
     auto in = kq::input_of(verb, group, arg);
-    if (verb == "sendfile") in = sendFile(group, arg);
+    if (verb == "file") in = sendFile(group, arg);
     if (!in) return;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_rt->input(nowS(), nowMs(), *in);
@@ -575,7 +575,8 @@ static void cliKq(const char* args) {
         return;
     }
     if ((verb == "invite" || verb == "send" || verb == "sendfile") && !group.empty() && !arg.empty()) {
-        kqCommand(verb.c_str(), group, arg);
+        // kq.cmd.sendfile is never delivered: storage keys stay short.
+        kqCommand(verb == "sendfile" ? "file" : verb.c_str(), group, arg);
         return;
     }
     if (verb == "groups") { printChats("", false); return; }
