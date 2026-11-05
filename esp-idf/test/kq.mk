@@ -24,6 +24,8 @@ CTIDH_DEFS := -DBITS=1024 -DCGONUTS -DHIGHCTIDH_PORTABLE=1
 ifeq ($(INT128),0)
 CTIDH_DEFS += -DFIAT_P1024_NO_INT128
 endif
+QR := $(ROOT)/components/kq_qrcode
+QR_O := $(B)/qr/qrcodegen.o
 KQ_SRC := $(filter-out $(ROOT)/src/kq_service.cpp,$(wildcard $(ROOT)/src/*.cpp))
 KQ_O := $(patsubst $(ROOT)/src/%.cpp,$(B)/kq/%.o,$(KQ_SRC))
 
@@ -35,7 +37,7 @@ endif
 CFLAGS := -O2 -g -DCONFIGURED -DNATIVE_LITTLE_ENDIAN -DHAVE_WEAK_SYMBOLS -D__STDC_LIMIT_MACROS \
 	-D__STDC_CONSTANT_MACROS -I$(SODIUM_SRC)/include -I$(SODIUM_SRC)/include/sodium -w
 CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -fsanitize=address,undefined \
-	-I$(ROOT)/include -I$(SODIUM_SRC)/include -I$(CTIDH)/highctidh $(CTIDH_DEFS) $(MBED_INC)
+	-I$(ROOT)/include -I$(QR) -I$(SODIUM_SRC)/include -I$(CTIDH)/highctidh $(CTIDH_DEFS) $(MBED_INC)
 LDLIBS := $(MBED_LIB) -lmbedcrypto -fsanitize=address,undefined
 
 $(B)/sodium/%.o: $(SODIUM_SRC)/%.c
@@ -50,3 +52,7 @@ $(B)/ctidh/%.o: $(CTIDH)/%.c $(ROOT)/test/kq.mk
 $(B)/kq/%.o: $(ROOT)/src/%.cpp $(wildcard $(ROOT)/include/*.h)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(B)/qr/%.o: $(QR)/%.c $(QR)/qrcodegen.h
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -std=c99 -I$(QR) -c $< -o $@

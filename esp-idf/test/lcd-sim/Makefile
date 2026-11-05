@@ -17,7 +17,7 @@ APP := $(ROOT)/conditional/spangap-lcd
 SIM_FLAGS := $(CXXFLAGS) $(LV_FLAGS) -Ishim -I$(APP)/include -I$(SPANGAP_LCD)/esp-idf/include -Wno-missing-field-initializers -Wno-deprecated-declarations
 SIM_O := $(B)/sim.o $(B)/sim_client.o $(B)/kq_lcd.o $(B)/lcd_input_box.o
 
-$(B)/kq-sim: $(SIM_O) $(KQ_O) $(SODIUM_O) $(CTIDH_O) $(LVGL_O)
+$(B)/kq-sim: $(SIM_O) $(QR_O) $(KQ_O) $(SODIUM_O) $(CTIDH_O) $(LVGL_O)
 	$(CXX) $^ -o $@ $(LDLIBS) $(shell pkg-config --libs freetype2) -lpthread
 
 $(B)/lvgl/%.o: $(LVGL_DIR)/src/%.c lv_conf.h
@@ -28,7 +28,7 @@ $(B)/%.o: %.cpp sim.h lv_conf.h $(wildcard shim/*.h) $(wildcard $(ROOT)/include/
 	@mkdir -p $(B)
 	$(CXX) $(SIM_FLAGS) -c $< -o $@
 
-$(B)/kq_lcd.o: $(APP)/src/kq_lcd.cpp $(APP)/include/kq_app.h $(ROOT)/include/kq_view.h
+$(B)/kq_lcd.o: $(APP)/src/kq_lcd.cpp $(APP)/include/kq_app.h $(ROOT)/include/kq_view.h $(QR)/kq_qr.h
 	@mkdir -p $(B)
 	$(CXX) $(SIM_FLAGS) -c $< -o $@
 
