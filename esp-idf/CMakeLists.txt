@@ -3,5 +3,5 @@ file(GLOB KQ_SRCS "src/*.cpp")
 idf_component_register(
     SRCS ${KQ_SRCS} ${SPANGAP_CONDITIONAL_SRCS}
     INCLUDE_DIRS "include" ${SPANGAP_CONDITIONAL_INCLUDE_DIRS}
-    REQUIRES ${SPANGAP_REQUIRES} mbedtls kq_sodium kq_ctidh esp_timer
+    REQUIRES ${SPANGAP_REQUIRES} mbedtls kq_sodium kq_ctidh kq_qrcode esp_timer
 )
