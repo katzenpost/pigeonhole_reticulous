@@ -1,0 +1,5 @@
+# The assembly field runs from IRAM, as mont32 does (linker.lf).
+[mapping:kq_ctidh_xtensa]
+archive: libkq_ctidh.a
+entries:
+    fp1024_xtensa (noflash)

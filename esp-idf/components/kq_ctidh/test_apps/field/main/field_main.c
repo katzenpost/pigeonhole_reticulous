@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// fp1024_mont32.c against fiat-crypto's field (fiat_p1024_*_ref) on the ESP32-S3, bit for bit:
+// The field KQ_CTIDH_FIELD picks (fp1024_xtensa.S by default, or fp1024_mont32.c) against
+// fiat-crypto's field (fiat_p1024_*_ref) on the ESP32-S3, bit for bit:
 // edge values, random elements below p, and chains of dependent operations.
 #include <stdint.h>
 #include <stdio.h>
