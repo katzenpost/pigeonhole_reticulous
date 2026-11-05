@@ -575,6 +575,12 @@ static void cliKq(const char* args) {
         return;
     }
     if ((verb == "invite" || verb == "send" || verb == "sendfile") && !group.empty() && !arg.empty()) {
+        if (verb == "sendfile") {
+            int h = fs_open(arg.c_str(), "rb");
+            if (h < 0) { cliPrintf("kq sendfile: no file %s\n", arg.c_str()); return; }
+            fs_close(h);
+            cliPrintf("kq sendfile: %s queued\n", arg.c_str());
+        }
         // kq.cmd.sendfile is never delivered: storage keys stay short.
         kqCommand(verb == "sendfile" ? "file" : verb.c_str(), group, arg);
         return;
