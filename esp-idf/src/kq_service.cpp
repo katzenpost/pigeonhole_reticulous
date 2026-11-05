@@ -26,7 +26,9 @@
 
 #include <sodium.h>
 
+#include "kq_bacap.h"
 #include "kq_nike.h"
+#include "kq_probe.h"
 #include "kq_replica.h"
 #include "kq_runtime.h"
 #include "kq_store.h"
@@ -55,7 +57,7 @@ static std::string hexOf(const uint8_t* p, size_t n) {
 static TaskHandle_t s_task = nullptr;
 static kq::ReplicaClient* s_client = nullptr;
 static unsigned s_sent = 0, s_sendFail = 0, s_recv = 0;
-static std::string s_probe = "-";
+static kq::Probe* s_probe = nullptr;
 
 static void wake() { if (s_task) xTaskNotifyGive(s_task); }
 
@@ -245,20 +247,9 @@ static void pumpClient() {
     xSemaphoreGive(s_mu);
 }
 
-static void probe() {
-    auto w = kq::bacap::WriteCap::generate([](uint8_t* p, size_t n) { randombytes_buf(p, n); });
-    kq::Bytes text{'k', 'q', ' ', 'p', 'r', 'o', 'b', 'e'};
-    auto r = w.read_cap();
-    s_probe = "writing";
-    bool ok = s_client->write(w, w.index, text, [r, text](uint8_t code) {
-        s_probe = "write code " + std::to_string(code);
-        if (code != kq::wire::SUCCESS) return;
-        s_client->read(r.root_pk, r.index, [text](const kq::ReadOutcome& o) {
-            bool same = o.kind == kq::ReadOutcome::FOUND && o.plaintext == text;
-            s_probe = same ? "ok: written and read back" : "read kind " + std::to_string((int)o.kind);
-        });
-    });
-    if (!ok) s_probe = "refused";
+static void probe(unsigned rounds) {
+    if (!s_probe->start(rounds, [](const std::string& s) { info("kq probe: %s", s.c_str()); }))
+        warn("kq probe: one is running, or no rounds asked");
 }
 
 // Commands reach the kq task as storage keys "kq.cmd.<verb>" = "<group>|<argument>",
@@ -267,7 +258,7 @@ static void onCmd(const char* key, const char* val) {
     if (!val || !*val) return;
     std::string verb = strrchr(key, '.') + 1, v = val;
     storageUnset(key);
-    if (verb == "probe") { probe(); return; }
+    if (verb == "probe") { probe((unsigned)atoi(val)); return; }
     if (!s_store) return;  // locked, or not chosen yet
     size_t bar = v.find('|');
     std::string group = v.substr(0, bar), arg = bar == std::string::npos ? "" : v.substr(bar + 1);
@@ -441,9 +432,47 @@ static void benchAction(const char* name, const std::function<void()>& f) {
     info("bench: %-14s %10.1f s", name, (esp_timer_get_time() - t0) / 1e6);
 }
 
+// n calls of f, wall time: the time per call.
+static void benchOp(const char* name, int n, const std::function<void()>& f) {
+    int64_t t0 = esp_timer_get_time();
+    for (int i = 0; i < n; i++) f();
+    info("bench: %-28s x%-4d %9.1f us per call", name, n, (double)(esp_timer_get_time() - t0) / n);
+}
+
+// What every box written and read costs here, as test/bench's bacap entries on the host.
+static void benchBacap() {
+    namespace bacap = kq::bacap;
+    static const uint8_t* ctx = (const uint8_t*)bacap::kPigeonholeCtx;
+    static constexpr size_t n = sizeof bacap::kPigeonholeCtx - 1;
+    auto rnd = [](uint8_t* p, size_t k) { randombytes_buf(p, k); };
+    auto w = bacap::WriteCap::generate(rnd);
+    auto r = w.read_cap();
+    kq::Bytes text(200, 'a');
+    auto padded = *kq::wire::pad(text.data(), text.size(), s_client->box_size());
+    auto box = bacap::encrypt(w, w.index, ctx, n, padded.data(), padded.size());
+    benchOp("box ID (blind the root key)", 100, [&] { bacap::box_id(r.root_pk, r.index, ctx, n); });
+    benchOp("encrypt and sign a box", 100, [&] { bacap::encrypt(w, w.index, ctx, n, padded.data(), padded.size()); });
+    benchOp("verify and decrypt a box", 100, [&] {
+        bacap::decrypt(r.index, box.box_id.data(), ctx, n, box.ciphertext.data(), box.ciphertext.size(),
+                       box.signature.data());
+    });
+    benchOp("next index", 100, [&] { w.index.next(); });
+    benchOp("pad a box", 100, [&] { kq::wire::pad(text.data(), text.size(), s_client->box_size()); });
+}
+
+enum BenchKind { BENCH_FIELD, BENCH_CTIDH, BENCH_BACAP };
+
 static void benchMain(void* arg) {
-    bool ctidh = arg != nullptr;
+    auto kind = (BenchKind)(intptr_t)arg;
     pmBoost();
+    if (kind == BENCH_BACAP) {
+        benchBacap();
+        info("bench: done");
+        pmBoostEnd();
+        s_bench = nullptr;
+        killSelf();
+    }
+    bool ctidh = kind == BENCH_CTIDH;
     static uint64_t y[16];
     randombytes_buf(y, sizeof y);
     y[15] &= (1ull << 59) - 1;
@@ -467,10 +496,20 @@ static void benchMain(void* arg) {
 
 // On the heavy worker's core, with its stack.
 static void cliBench(const std::string& what) {
-    if (what != "field" && what != "ctidh") { cliPrintf("kq bench field | ctidh\n"); return; }
+    // radio: what a box costs at the replica, timed as kq probe times it.
+    if (what.compare(0, 5, "radio") == 0) {
+        std::string n = what.size() > 6 ? what.substr(6) : "10";
+        storageSet("kq.cmd.probe", n.c_str());
+        cliPrintf("kq bench radio: %s rounds queued; `kq` and `log` show the result\n", n.c_str());
+        return;
+    }
+    if (what != "field" && what != "ctidh" && what != "bacap") {
+        cliPrintf("kq bench field | ctidh | bacap | radio [rounds]\n");
+        return;
+    }
     if (s_bench) { cliPrintf("kq bench: one is running; `log` shows it\n"); return; }
-    s_bench = spawnTask(benchMain, "kq.bench", kHeavyStack, what == "ctidh" ? (void*)1 : nullptr, 1, 1,
-                        STACK_PSRAM);
+    BenchKind k = what == "ctidh" ? BENCH_CTIDH : what == "bacap" ? BENCH_BACAP : BENCH_FIELD;
+    s_bench = spawnTask(benchMain, "kq.bench", kHeavyStack, (void*)(intptr_t)k, 1, 1, STACK_PSRAM);
     cliPrintf(s_bench ? "kq bench %s: started; the results go to the log\n" : "kq bench %s: no memory for the task\n",
               what.c_str());
 }
@@ -498,7 +537,11 @@ static void cliKq(const char* args) {
         cliPrintf("asked; `kq` shows the result\n");
         return;
     }
-    if (verb == "probe") { storageSet("kq.cmd.probe", "1"); cliPrintf("probe queued; `kq` shows the result\n"); return; }
+    if (verb == "probe") {
+        storageSet("kq.cmd.probe", group.empty() ? "1" : group.c_str());
+        cliPrintf("probe queued; `kq` shows the result\n");
+        return;
+    }
     if ((verb == "create" || verb == "join" || verb == "scan" || verb == "leave") && !group.empty()) {
         kqCommand(verb.c_str(), group);
         return;
@@ -510,8 +553,8 @@ static void cliKq(const char* args) {
     if (verb == "groups") { printChats("", false); return; }
     if (verb == "log" && !group.empty()) { printChats(group, true); return; }
     if (!a.empty() && verb != "status") {
-        cliPrintf("kq [status] | probe | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n"
-                  "   | bench field | bench ctidh | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
+        cliPrintf("kq [status] | probe [rounds] | groups | log <g> | create <g> | join <g> | invite <g> <code> | send <g> <text>\n"
+                  "   | bench field | ctidh | bacap | radio [rounds] | setup none | setup passphrase <passphrase> | unlock <passphrase>\n");
         return;
     }
     static const char* locks[] = {"starting", "no choice made yet: kq setup none | kq setup passphrase <p>",
@@ -524,12 +567,17 @@ static void cliKq(const char* args) {
                   (unsigned)s_vault->last_ops, (unsigned)s_vault->last_ms);
     cliPrintf("PSRAM: %u KiB free, %u KiB in one piece\n", (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10),
               (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) >> 10));
+    cliPrintf("internal RAM: %u KiB free, %u KiB at the least so far\n",
+              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >> 10),
+              (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) >> 10));
     cliPrintf("replicas heard: %u\n", (unsigned)s_replicas.size());
     for (auto& [d, r] : s_replicas) cliPrintf("  %s hops %d flags %d\n", d.c_str(), r.hops, r.flags);
     cliPrintf("channel: %s %s\n", s_chanDest.empty() ? "-" : s_chanDest.c_str(),
               s_chan < 0 ? "closed" : s_chanUp ? "up" : "opening");
     cliPrintf("requests pending: %u, box size %u\n", (unsigned)s_client->pending(), (unsigned)s_client->box_size());
-    cliPrintf("frames sent %u, refused %u, received %u; probe: %s\n", s_sent, s_sendFail, s_recv, s_probe.c_str());
+    cliPrintf("frames sent %u, refused %u, received %u\n", s_sent, s_sendFail, s_recv);
+    cliPrintf("probe: %s\n", s_probe->write.ms.empty() && !s_probe->write.failed && !s_probe->running()
+                                ? "-" : s_probe->status().c_str());
     if (s_store) cliPrintf("saved: %u writes, %u bytes\n", (unsigned)s_store->writes, (unsigned)s_store->bytes);
 }
 
@@ -591,6 +639,7 @@ void KqService::onInit() {
     storageDefault("s.kq.name", "kq");
     storageEnd();
     s_client = new kq::ReplicaClient((size_t)storageGetInt("s.kq.box_size", 1549), sendFrame);
+    s_probe = new kq::Probe(*s_client, nowMs, [](uint8_t* p, size_t n) { randombytes_buf(p, n); });
     s_mu = xSemaphoreCreateMutex();
     s_lightQ = xQueueCreate(1, sizeof(kq1::Action*));
     s_heavyQ = xQueueCreate(1, sizeof(kq1::Action*));
