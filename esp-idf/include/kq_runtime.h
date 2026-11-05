@@ -66,7 +66,7 @@ private:
     ReplicaClient& client_;
     Bridge bridge_;
     std::string error_ = "failed";
-    // The seal public key of each secret key minted here, so opening a reply costs no CTIDH action.
+    // The seal public key of each secret key minted here, so opening a reply costs one CTIDH action, not two.
     std::map<Bytes, Bytes> seal_pub_;
 };
 

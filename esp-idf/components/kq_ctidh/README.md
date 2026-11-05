@@ -61,5 +61,24 @@ xtensa against mont32, in `test_apps/field`'s image: `.iram0.text` −44 B, `.dr
   between the instructions of one translation block.
 - The voucher's CTIDH on the ESP32-S3, in QEMU: `make -C esp-idf/test/qemu-voucher run` runs
   `test/host/test_voucher.cpp` (mint, induct, sealed reply and open, both forms, against hpqc's
-  vectors) with the field the firmware takes there, its stack in PSRAM as on the device.
-- Timing: `kq bench field|ctidh` on a device, `esp-idf/test/bench` on the host.
+  vectors) with the field the firmware takes there, its stack in PSRAM as on the device: once
+  with a seal's two CTIDH actions in turn, once on both cores.
+- Timing: `kq bench field|ctidh|join` on a device, `esp-idf/test/bench` on the host.
+
+## Both cores for a voucher join
+A seal makes an ephemeral keypair and its shared secret with the recipient's key: two CTIDH
+actions from one private key, neither feeding the other. `kq::nike::both` runs them
+(`src/kq_nike.cpp`): `in_turn`, or `at_once`, which on the ESP32-S3 runs the keypair's action on
+a task pinned to the other core, its 384 KB stack in PSRAM, and falls back to in turn when that
+task cannot be made. Per join step:
+
+| step | side | CTIDH | at once |
+|---|---|---|---|
+| mint | joiner | the seal keypair: one action | nothing to pair |
+| induct | member | the voucher key checked (`validate`); then the seal: the ephemeral keypair ‖ the shared secret (which checks the key again) | the seal's two actions |
+| open | joiner | the shared secret with the ephemeral key; with the seal public key not at hand (after a restart, compact form), that key too | those two, then |
+
+The firmware's `s.kq.cores` (default 2) set to 1 runs them in turn. `kq bench join` times the
+induct and the open both ways from one seed and checks the outputs match. The two cores share
+the caches and the flash/PSRAM bus, and Wi-Fi runs on core 0, so the gain is under 2x: it is for
+the device run to measure.
