@@ -209,6 +209,8 @@ struct State {
 
 constexpr size_t WINDOW = 8;
 uint64_t backoff(size_t n);
+// How often a radio group's members are polled: a burst is heard about this long after it lands.
+constexpr uint64_t RADIO_POLL_MS = 1000;
 std::string voucher_code(const Bytes& voucher);
 std::string sanitize(const std::string& name);
 
@@ -220,6 +222,8 @@ public:
     uint64_t wire_version = CURRENT_VERSION;
     // The largest file sent, kept or fetched: a device has less room than MAX_FILE.
     size_t max_file = MAX_FILE;
+    // Groups listened to as radio: their streams are polled every RADIO_POLL_MS, not backed off.
+    std::set<ChatId> radio;
 
     Engine(State s, size_t max) : state(std::move(s)), max_plaintext(max) {}
     StepResult step(int64_t now, const Input& input);

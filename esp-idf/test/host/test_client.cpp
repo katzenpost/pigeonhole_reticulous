@@ -535,6 +535,13 @@ static void file_tests(const char* out_path) {
         check(file(w, 0, "cat.png") == pic && w.chat(0, "g")->jobs.empty() && spooled(w, 0) == 0, v,
               "the sender keeps its copy, and the spool is emptied");
         check(says(w, 1, "[file cat.png, 20 KB]"), v, "the line names it");
+        // A radio group is polled every second however long it has been quiet; the least backoff is 2 s.
+        w.members[1].eng.radio.insert("g");
+        w.run_to(w.clock + 600000);
+        uint64_t bob = 0;
+        for (auto& l : w.later)
+            if (l.in && l.in->kind == Input::WAKE && l.who == 1) bob = std::max(bob, l.due - w.clock);
+        check(bob == RADIO_POLL_MS && backoff(0) > RADIO_POLL_MS, v, "radio polls every second");
         // What the C++ engine wrote, for pigeonhole_protocols to read (filevec read).
         if (out_path) {
             Bytes ibox;

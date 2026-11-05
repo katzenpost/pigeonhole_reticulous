@@ -26,6 +26,9 @@ CTIDH_DEFS += -DFIAT_P1024_NO_INT128
 endif
 KQ_SRC := $(filter-out $(ROOT)/src/kq_service.cpp,$(wildcard $(ROOT)/src/*.cpp))
 KQ_O := $(patsubst $(ROOT)/src/%.cpp,$(B)/kq/%.o,$(KQ_SRC))
+# The voice slice's parts that need no lxst (conditional/lxst/, built on a device only with it).
+VOICE_SRC := $(wildcard $(ROOT)/conditional/lxst/src/kq_ogg.cpp)
+VOICE_O := $(patsubst $(ROOT)/conditional/lxst/src/%.cpp,$(B)/voice/%.o,$(VOICE_SRC))
 
 ifdef MBEDTLS_DIR
 MBED_INC := -I$(MBEDTLS_DIR)/include
@@ -35,7 +38,7 @@ endif
 CFLAGS := -O2 -g -DCONFIGURED -DNATIVE_LITTLE_ENDIAN -DHAVE_WEAK_SYMBOLS -D__STDC_LIMIT_MACROS \
 	-D__STDC_CONSTANT_MACROS -I$(SODIUM_SRC)/include -I$(SODIUM_SRC)/include/sodium -w
 CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -fsanitize=address,undefined \
-	-I$(ROOT)/include -I$(SODIUM_SRC)/include -I$(CTIDH)/highctidh $(CTIDH_DEFS) $(MBED_INC)
+	-I$(ROOT)/include -I$(ROOT)/conditional/lxst/include -I$(SODIUM_SRC)/include -I$(CTIDH)/highctidh $(CTIDH_DEFS) $(MBED_INC)
 LDLIBS := $(MBED_LIB) -lmbedcrypto -fsanitize=address,undefined
 
 $(B)/sodium/%.o: $(SODIUM_SRC)/%.c
@@ -48,5 +51,9 @@ $(B)/ctidh/%.o: $(CTIDH)/%.c $(ROOT)/test/kq.mk
 	$(CC) -O2 -fwrapv $(CTIDH_DEFS) $(if $(findstring fiat_p1024.c,$<),$(FIAT_REF)) -I$(CTIDH)/highctidh -I$(SODIUM_SRC)/include -w -c $< -o $@
 
 $(B)/kq/%.o: $(ROOT)/src/%.cpp $(wildcard $(ROOT)/include/*.h)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(B)/voice/%.o: $(ROOT)/conditional/lxst/src/%.cpp $(wildcard $(ROOT)/include/*.h $(ROOT)/conditional/lxst/include/*.h)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
