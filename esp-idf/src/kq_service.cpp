@@ -379,7 +379,9 @@ void fiat_p1024_add(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
 void fiat_p1024_sub(uint64_t o[16], const uint64_t a[16], const uint64_t b[16]);
 }
 #if __XTENSA__
+extern "C" {  // IDF's eri.h has no C++ guard
 #include "eri.h"
+}
 #include "xtensa-debug-module.h"
 #include "xtensa/xt_perf_consts.h"
 // IDF's xtensa_perfmon_init/start/stop/value, from its xtensa component; counting at every
