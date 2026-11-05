@@ -139,7 +139,7 @@ std::optional<kq1::Inducted> ReplicaBackend::voucher_induct(const Bytes& voucher
 std::optional<kq1::Opened> ReplicaBackend::voucher_open(const Bytes& secret_key, const Bytes& sealed,
                                                         const Bytes& write_cap) {
     auto it = seal_pub_.find(secret_key);
-    Bytes pub = it != seal_pub_.end() ? it->second : nike::public_of(secret_key);
+    Bytes pub = it != seal_pub_.end() ? it->second : Bytes();
     auto o = kq1::voucher::open_reply(secret_key, pub, sealed, write_cap);
     if (!o) { error_ = "the reply would not open"; return std::nullopt; }
     return kq1::Opened{o->who_reply, o->mutated_write_cap};

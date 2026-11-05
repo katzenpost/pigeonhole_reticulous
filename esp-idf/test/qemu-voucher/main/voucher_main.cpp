@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // test/host/test_voucher.cpp on the ESP32-S3, with the CTIDH field the firmware builds there:
-// mint, induct and open in both forms against hpqc's vectors. It runs on a task with its stack
-// in PSRAM, as the firmware's kq.ctidh worker does.
+// mint, induct and open in both forms against hpqc's vectors, a seal's two CTIDH actions in turn
+// and on both cores. It runs on a task with its stack in PSRAM, as the firmware's kq.ctidh worker does.
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -16,6 +16,9 @@ extern const char vectors_txt[] asm("_binary_vectors_txt_start");
 
 static void run(void*) {
     g_vectors_text = vectors_txt;
+    int ca = -1, cb = -1;
+    kq::nike::at_once([&] { ca = xPortGetCoreID(); }, [&] { cb = xPortGetCoreID(); });
+    printf("voucher: at_once runs a on core %d, b on core %d\n", ca, cb);
     char none[] = "", *argv[] = {none, none};
     int64_t t0 = esp_timer_get_time();
     int r = test_voucher_main(2, argv);

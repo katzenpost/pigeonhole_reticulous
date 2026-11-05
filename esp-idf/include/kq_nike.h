@@ -16,6 +16,15 @@ constexpr const char kSealName[] = "CTIDH1024-X25519";
 
 using Rng = std::function<void(uint8_t*, size_t)>;
 
+// How a seal, and opening one without the public key at hand, run their two CTIDH-1024 actions:
+// both start from the one private key and neither feeds the other. in_turn runs a, then b;
+// at_once runs b meanwhile on the other core (the ESP32-S3: a task pinned there, its stack in
+// PSRAM; in turn when there is no memory for it) or on a thread. The results are the same.
+using Fn = std::function<void()>;
+void in_turn(const Fn& a, const Fn& b);
+void at_once(const Fn& a, const Fn& b);
+extern void (*both)(const Fn& a, const Fn& b);  // in_turn unless set
+
 // SHAKE256(seed) as an entropy stream, as hpqc's shakeReader.
 class Shake {
 public:
@@ -36,7 +45,8 @@ std::optional<Bytes> derive_secret(const Bytes& priv, const Bytes& pub);
 Bytes public_of(const Bytes& priv);
 bool valid_public(const Bytes& pub);
 
-// hpqc protocols/sealedbox: ephemeral public key, then XSalsa20-Poly1305.
+// hpqc protocols/sealedbox: ephemeral public key, then XSalsa20-Poly1305. An empty pub in open
+// is derived beside the shared secret.
 Bytes seal(const Bytes& recipient_pub, const uint8_t* pt, size_t len, const Rng& rng,
            const std::string& name = kSealName);
 std::optional<Bytes> open(const Bytes& priv, const Bytes& pub, const uint8_t* ct, size_t len,

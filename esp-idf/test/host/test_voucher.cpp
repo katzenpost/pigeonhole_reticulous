@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Vouchers against hpqc voucher/testdata: mint, induct and open, in both forms.
+// Vouchers against hpqc voucher/testdata: mint, induct and open, in both forms, with a seal's two
+// CTIDH actions in turn and at once.
 #include <sodium.h>
 
 #include "kq1_voucher.h"
@@ -11,7 +12,9 @@ namespace v1 = kq1::voucher;
 int main(int, char** argv) {
     const char* path = argv[1];
     if (sodium_init() < 0) return 2;
+    for (auto run : {nike::in_turn, nike::at_once})
     for (const char* f : {"voucher/voucher_vectors_v2.json", "voucher/voucher_vectors.json"}) {
+        nike::both = run;
         int form = std::string(f).find("v2") != std::string::npos ? v1::COMPACT : v1::LONG;
         auto vs = load(path, f);
         auto get = [&](const char* sect) -> const Vec& {
@@ -46,6 +49,9 @@ int main(int, char** argv) {
         if (!o) continue;
         check(o->who_reply == open.hex("who_reply") && o->salt == open.hex("salt"), open, "who reply and salt");
         check(o->mutated_write_cap == open.hex("mutated_message_write_cap"), open, "live write cap");
+        auto o2 = v1::open_reply(m->secret_key, {}, r->sealed, in.hex("message_write_cap"));
+        check(o2 && o2->who_reply == o->who_reply && o2->salt == o->salt && o2->mutated_write_cap == o->mutated_write_cap,
+              open, "opens without the public key");
 
         auto bad = m->payload;
         bad.back() ^= 1;
