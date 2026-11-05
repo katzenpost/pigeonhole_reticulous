@@ -109,6 +109,21 @@ int main(int, char**) {
     run(both, t, t + 600000);
     check(says(bob, "hello bob"), v, "bob read alice");
     check(says(alice, "hello alice"), v, "alice read bob");
+    // carol writes wire version 3 (s.kq.wire_version on a device): her voucher is the long form,
+    // the one a founder on hpqc v0.0.95 reads.
+    Peer carol("carol", rep);
+    carol.rt.eng.wire_version = MAP_VERSION;
+    std::vector<Peer*> three{&alice, &bob, &carol};
+    carol.in(make(Input::JOIN), t);
+    run(three, t, t + 60000);
+    auto cj = carol.chat() ? carol.chat()->joining : std::nullopt;
+    check(cj && cj->version == 1 && !cj->code.empty(), v, "carol's voucher is the long form");
+    Input ind3 = make(Input::INDUCT);
+    ind3.code = cj ? cj->code : "";
+    alice.in(ind3, t);
+    run(three, t, t + 600000);
+    check(carol.chat() && carol.chat()->group.has_value(), v, "carol joined");
+
     for (auto* m : both) {
         printf("%s:\n", m->name.c_str());
         if (m->chat())
