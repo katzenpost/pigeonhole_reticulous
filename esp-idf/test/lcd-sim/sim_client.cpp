@@ -182,9 +182,10 @@ void kqLoop() {
 void simClientStart(const std::string& socketPath, const std::string& name, size_t boxSize, const std::string& stateDir) {
     if (sodium_init() < 0) { fprintf(stderr, "sim: sodium_init failed\n"); exit(1); }
     g_path = socketPath;
-    g_client = new kq::ReplicaClient(boxSize, sendFrame);
+    // As the device: written at the mesh size, boxSize read too.
+    g_client = new kq::ReplicaClient(kq::wire::kBoxMesh, sendFrame, {boxSize});
     g_backend = new kq::ReplicaBackend(*g_client, bridge);
-    g_rt = new kq::Runtime(kq1::State{name, {}}, boxSize);
+    g_rt = new kq::Runtime(kq1::State{name, {}}, kq::wire::kBoxMesh);
     g_name = name;
     g_stateDir = stateDir;
     g_vault = new kq::Vault(kq::posix_files(stateDir));

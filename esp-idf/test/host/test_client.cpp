@@ -57,6 +57,15 @@ struct Sim : Backend {
     size_t max = 1530;
     size_t fail_writes = 0;
     std::vector<std::pair<Bytes, uint64_t>> refused;
+    // Push, as a replica announcing it serves: a box watched is pushed once written.
+    bool push = false;
+    std::set<std::pair<Bytes, Bytes>> watching;
+    std::vector<Bytes> woken;
+    static Bytes id_of(const std::pair<Bytes, Bytes>& k) {
+        Bytes id = k.first;
+        id.insert(id.end(), k.second.begin(), k.second.end());
+        return id;
+    }
 
     static std::optional<Bytes> read_cap_of(const Bytes& wc) {
         if (wc.size() != 32 + 136) return std::nullopt;
@@ -79,7 +88,15 @@ struct Sim : Backend {
             return Write::EXISTS;
         }
         boxes[k] = {epoch, plaintext};
+        if (watching.erase(k)) woken.push_back(id_of(k));
         return Write::OK;
+    }
+    std::optional<Bytes> watch(const Bytes& read_cap, const Index& index) override {
+        if (!push) return std::nullopt;
+        auto k = std::make_pair(Bytes(read_cap.begin(), read_cap.begin() + 32), index);
+        if (boxes.count(k)) woken.push_back(id_of(k));
+        else watching.insert(k);
+        return id_of(k);
     }
     std::optional<Read> read_box(const Bytes& read_cap, const Index& index) override {
         auto it = boxes.find({Bytes(read_cap.begin(), read_cap.begin() + 32), index});
@@ -137,8 +154,17 @@ struct Sim : Backend {
 static std::string kind_of(const Action& a) {
     static const char* names[] = {"Create", "Write", "Read", "Wake", "ScanRead", "Walk", "Derive", "Mint", "AwaitReply",
                                   "ReadVoucher", "Seal", "Publish", "Delete", "Load", "Substream", "WriteChunk",
-                                  "ChunkIndexes", "ReadChunk"};
+                                  "ChunkIndexes", "ReadChunk", "Tick"};
+    static_assert(sizeof names / sizeof *names == Action::TICK + 1, "a name for each action");
     return names[a.kind];
+}
+
+static std::string kind_of(const Input& i) {
+    switch (i.kind) {
+        case Input::WAKE: return "Wake";
+        case Input::TICK: return "Tick";
+        default: return "Input" + std::to_string(i.kind);
+    }
 }
 
 struct Client {
@@ -159,6 +185,7 @@ struct Later {
     size_t who;
     std::optional<Action> act;
     std::optional<Input> in;
+    Bytes until;
 };
 
 struct World {
@@ -171,11 +198,31 @@ struct World {
     std::map<size_t, std::string> delay_next;
     std::map<size_t, std::vector<Input>> delayed;
     std::map<std::string, size_t> performed;  // actions carried out, by kind
+    // Plain clients neither pack messages nor send receipts, as group_chat_client's, whose
+    // scenarios testdata/katzenqt1/client_scenarios are.
+    bool plain = false;
+    std::shared_ptr<Watched> watched = std::make_shared<Watched>();
+    std::set<Bytes> early;  // pushed before the wake waiting for them
 
+    Engine engine(State s) const {
+        Engine e(std::move(s), 1530);
+        if (plain) { e.pack = false; e.receipt_delay = 0; }
+        return e;
+    }
     size_t who(const std::string& name) {
         for (size_t i = 0; i < members.size(); i++) if (members[i].name == name) return i;
-        members.push_back({name, Engine(State{name, {}}, 1530)});
+        members.push_back({name, engine(State{name, {}})});
         return members.size() - 1;
+    }
+    // What the sim pushed makes the wakes waiting for it due now.
+    void pushed() {
+        for (auto& id : sim.woken) {
+            bool waited = false;
+            for (auto& l : later)
+                if (l.until == id) { l.due = std::min(l.due, clock); waited = true; }
+            if (!waited) early.insert(id);
+        }
+        sim.woken.clear();
     }
     void feed(size_t i, const Input& input) { release(i, members[i].eng.step(0, input)); }
     void release(size_t i, const StepResult& res) {
@@ -201,7 +248,7 @@ struct World {
                                               auto it = kept->find(f);
                                               return it == kept->end() ? std::nullopt : std::optional<Bytes>(it->second);
                                           },
-                                          [kept](const std::string& f) { kept->erase(f); }}};
+                                          [kept](const std::string& f) { kept->erase(f); }}, watched};
         std::string kind = kind_of(a);
         performed[kind]++;
         Done o = x.perform(a);
@@ -209,12 +256,14 @@ struct World {
             delay_next.erase(w);
             delayed[w].push_back(*o.input);
         } else if (o.kind == Done::RETRY) {
-            later.push_back({clock + o.ms, w, *o.action, std::nullopt});
+            later.push_back({clock + o.ms, w, *o.action, std::nullopt, {}});
         } else if (o.kind == Done::LATER) {
-            later.push_back({clock + o.ms, w, std::nullopt, *o.input});
+            bool now = !o.until.empty() && early.erase(o.until);
+            later.push_back({now ? clock : clock + o.ms, w, std::nullopt, *o.input, o.until});
         } else if (o.kind == Done::DONE) {
             feed(w, *o.input);
         }
+        pushed();
         return true;
     }
     void run_to(uint64_t stop) {
@@ -257,7 +306,7 @@ struct World {
         if (!c) return {"no such group"};
         std::vector<std::string> out;
         for (auto& l : c->log) {
-            if (l.notice) { out.push_back("— " + plain(*l.notice)); continue; }
+            if (l.notice) { out.push_back("— " + kq1::plain(*l.notice)); continue; }
             bool mine = c->group && c->group->me() == l.sender;
             std::string mark = !mine ? "" : l.status == Status::Pending ? " …" : c->acknowledged(l) ? " ✓✓" : " ✓";
             std::string text = l.text;
@@ -399,6 +448,21 @@ struct World {
             return jobs(who(w[1]), w[2]);
         } else if (is("refused", 1)) {
             return refused_names();
+        } else if (is("box-size", 3)) {
+            members[who(w[1])].eng.max_plaintext = std::stoul(w[2]);
+        } else if (is("pending", 2)) {
+            size_t i = who(w[1]);
+            std::vector<std::string> kinds;
+            for (auto& [m, a] : queue) if (m == i) kinds.push_back(kind_of(a));
+            for (auto& l : later) if (l.who == i) kinds.push_back(l.act ? kind_of(*l.act) : kind_of(*l.in));
+            std::sort(kinds.begin(), kinds.end());
+            std::string s;
+            for (auto& k : kinds) s += (s.empty() ? "" : " ") + k;
+            return {s.empty() ? "none" : s};
+        } else if (w.size() > 2 && w[0] == "repeat") {
+            std::vector<std::string> rest(w.begin() + 2, w.end()), out;
+            for (size_t k = std::stoul(w[1]); k > 0; k--) out = command(rest);
+            return out;
         } else {
             std::string all;
             for (auto& x : w) all += x + " ";
@@ -413,8 +477,9 @@ static std::string trim(const std::string& s) {
     return a == std::string::npos ? "" : s.substr(a, b - a + 1);
 }
 
-static std::string run_script(const std::string& script) {
+static std::string run_script(const std::string& script, bool plain) {
     World world;
+    world.plain = plain;
     std::vector<std::string> lines;
     size_t p = 0, q;
     while ((q = script.find('\n', p)) != std::string::npos) { lines.push_back(script.substr(p, q - p)); p = q + 1; }
@@ -882,7 +947,7 @@ static void ping_tests() {
     Gcm g;
     g.version = CURRENT_VERSION;
     g.membership_hash = c->group->membership(nullptr);
-    g.msg_type = 12;
+    g.msg_type = 13;
     Bytes cbor = g.to_bytes();
     for (auto& o : c->group->compose(cbor)) {
         Job j;
@@ -895,26 +960,50 @@ static void ping_tests() {
     w.feed(0, x);
     run();
     check(says(w, 1, "after the unknown") &&
-              noticed(w, 1, "~alice sent a message this app cannot show (type 12, version 4): update the app"), v,
+              noticed(w, 1, "~alice sent a message this app cannot show (type 13, version 5): update the app"), v,
           "an unknown type is noticed, and what follows it read");
 }
 
-int main() {
-    if (sodium_init() < 0) return 2;
-    const char* env = getenv("KQ1_TESTDATA");
-    fs::path dir = fs::path(env ? env : "../../../../pigeonhole_protocols/testdata/katzenqt1") / "client_scenarios";
-    if (!fs::is_directory(dir)) { fprintf(stderr, "no directory %s (set KQ1_TESTDATA)\n", dir.c_str()); return 2; }
+// Push, from a replica that serves it: a stream that missed waits for its box, and reads again only
+// every PUSHED_POLL_MS in case the push was lost.
+static void push_tests() {
+    Vec v{"client", "push", {}};
+    size_t idle[2] = {0, 0};
+    bool at_once[2] = {false, false};
+    for (int push = 0; push < 2; push++) {
+        World w;
+        w.sim.push = push;
+        found_and_join(w);
+        size_t before = w.performed["Read"];
+        w.run_to(w.clock + 600000);
+        idle[push] = w.performed["Read"] - before;
+        Input x(Input::SEND);
+        x.chat = "g";
+        x.text = "pushed";
+        w.feed(0, x);
+        w.run_to(w.clock + 1000);
+        at_once[push] = says(w, 1, "pushed");
+        w.run_to(w.clock + 600000);
+        check(says(w, 1, "pushed"), v, push ? "read, with push" : "read, by polling");
+    }
+    printf("client: reads in ten quiet minutes: %zu polling, %zu with push\n", idle[0], idle[1]);
+    check(idle[1] * 3 < idle[0], v, "with push, a third of the reads or fewer");
+    check(at_once[1], v, "with push, a message read within a second of its write");
+}
+
+static void run_scenarios(const fs::path& dir, size_t count, bool plain) {
+    if (!fs::is_directory(dir)) { fprintf(stderr, "no directory %s (set KQ1_TESTDATA)\n", dir.c_str()); exit(2); }
     std::vector<fs::path> files;
     for (auto& e : fs::directory_iterator(dir)) files.push_back(e.path());
     std::sort(files.begin(), files.end());
-    Vec v{"client", "", {}};
-    check(files.size() == 8, v, "8 client scenarios");
+    Vec v{"client", dir.filename().string(), {}};
+    check(files.size() == count, v, (std::to_string(count) + " client scenarios").c_str());
     for (auto& f : files) {
         Vec s{"client", f.filename().string(), {}};
         std::ifstream in(f);
         std::string script((std::istreambuf_iterator<char>(in)), {});
         try {
-            std::string got = run_script(script);
+            std::string got = run_script(script, plain);
             if (got != script) {
                 auto split = [](const std::string& t) {
                     std::vector<std::string> v;
@@ -934,8 +1023,19 @@ int main() {
             check(false, s, "runs");
         }
     }
+}
+
+int main() {
+    if (sodium_init() < 0) return 2;
+    const char* env = getenv("KQ1_TESTDATA");
+    // group_chat_client's, which neither packs nor sends receipts; then pigeonhole_protocols' own
+    // (go/protocols/katzenqt1/client/testdata/scenarios) on packing and receipts, copied here.
+    run_scenarios(fs::path(env ? env : "../../../../pigeonhole_protocols/testdata/katzenqt1") / "client_scenarios", 8, true);
+    run_scenarios("vectors/katzenqt1/scenarios", 2, false);
+    Vec v{"client", "", {}};
     file_tests(getenv("KQ_FILES_OUT"));
     ping_tests();
+    push_tests();
     if (const char* out = getenv("KQ_FILES_OUT")) {
         FILE* f = fopen(out, "w");
         if (f) {

@@ -450,7 +450,7 @@ static bool upload_map(Span& l, Bytes& out) {
 }
 
 Bytes Gcm::to_bytes() const {
-    if (version < CURRENT_VERSION) return to_map_bytes();
+    if (version < ARRAY_VERSION) return to_map_bytes();
     const std::optional<Bytes>* tail[] = {&acks, &numbers, &introduced_at};
     size_t n = 0;
     for (size_t i = 0; i < 3; i++) if (tail[i]->has_value()) n = i + 1;
@@ -462,7 +462,10 @@ Bytes Gcm::to_bytes() const {
     const char* key = body_key(msg_type);
     const RawField* raw = nullptr;
     if (key) for (auto& o : other) if (o.key == key) { raw = &o; break; }
-    if (msg_type == MSG_TEXT) {
+    if (msg_type == MSG_PACKED) {
+        push_header(out, 4, texts.size());
+        for (auto& t : texts) push_text(out, t);
+    } else if (msg_type == MSG_TEXT) {
         push_text(out, text.value_or(""));
     } else if (msg_type == MSG_INTRODUCTION) {
         if (introduction) {
@@ -519,15 +522,28 @@ Bytes Gcm::to_map_bytes() const {
     return out;
 }
 
+static bool known_type(uint64_t msg_type, uint64_t version) {
+    return msg_type <= MSG_PING || (msg_type == MSG_PACKED && version >= PACKED_VERSION);
+}
+
 static std::optional<Gcm> from_array(const Bytes& b) {
     Span l = span(b);
     uint64_t n;
     Gcm g;
     if (!read_array(l, n) || n < 4 || n > 7) return std::nullopt;
     if (!read_uint(l, g.version) || !read_bytes(l, g.membership_hash) || !read_uint(l, g.msg_type)) return std::nullopt;
-    if (g.version < CURRENT_VERSION || g.membership_hash.size() != HASH_SIZE || g.msg_type > MSG_PING)
+    if (g.version < ARRAY_VERSION || g.version > CURRENT_VERSION || g.membership_hash.size() != HASH_SIZE ||
+        !known_type(g.msg_type, g.version))
         return std::nullopt;
-    if (g.msg_type == MSG_TEXT) {
+    if (g.msg_type == MSG_PACKED) {
+        uint64_t k;
+        if (!read_array(l, k) || k == 0 || k > l.n) return std::nullopt;
+        for (uint64_t i = 0; i < k; i++) {
+            std::string s;
+            if (!read_text(l, s)) return std::nullopt;
+            g.texts.push_back(std::move(s));
+        }
+    } else if (g.msg_type == MSG_TEXT) {
         std::string s;
         if (!read_text(l, s)) return std::nullopt;
         g.text = s;
@@ -735,13 +751,37 @@ std::optional<std::pair<uint64_t, uint64_t>> unsupported(const Bytes& cbor) {
     Bytes hash;
     if (!read_array(l, n) || n < 3 || !read_uint(l, version) || !read_bytes(l, hash) || !read_uint(l, msg_type))
         return std::nullopt;
-    if (version > CURRENT_VERSION || msg_type > MSG_PING) return std::make_pair(version, msg_type);
+    if (version > CURRENT_VERSION || !known_type(msg_type, version)) return std::make_pair(version, msg_type);
     return std::nullopt;
+}
+
+std::optional<Bytes> pack(const Bytes& cbor, const std::string& text) {
+    auto g = Gcm::from_bytes(cbor);
+    if (!g || g->version < ARRAY_VERSION || (g->msg_type != MSG_TEXT && g->msg_type != MSG_PACKED)) return std::nullopt;
+    if (g->msg_type == MSG_TEXT) {
+        g->version = std::max(g->version, PACKED_VERSION);
+        g->msg_type = MSG_PACKED;
+        g->texts = {g->text.value_or("")};
+        g->text.reset();
+    }
+    g->texts.push_back(text);
+    return g->to_bytes();
+}
+
+std::vector<std::string> texts_of(const Bytes& content) {
+    auto g = Gcm::from_bytes(content);
+    if (g && g->msg_type == MSG_PACKED) return g->texts;
+    return {text_of(content)};
 }
 
 std::string text_of(const Bytes& content) {
     auto g = Gcm::from_bytes(content);
     if (!g) return "[a message that cannot be read]";
+    if (g->msg_type == MSG_PACKED) {
+        std::string s;
+        for (size_t i = 0; i < g->texts.size(); i++) s += (i ? "\n" : "") + g->texts[i];
+        return s;
+    }
     if (g->msg_type == MSG_TEXT) return g->text.value_or("");
     if (g->msg_type == MSG_FILE_UPLOAD) return "[a file that cannot be read]";
     return "[a message that cannot be shown]";

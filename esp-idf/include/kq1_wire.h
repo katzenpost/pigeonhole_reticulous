@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// The katzenqt1 wire, version 4 arrays and version 3 maps, as pigeonhole_protocols
+// The katzenqt1 wire, version 4 and 5 arrays and version 3 maps, as pigeonhole_protocols
 // rust/src/protocols/katzenqt1/wire.
 #pragma once
 #include <algorithm>
@@ -17,9 +17,11 @@ using kq::Bytes;
 
 constexpr size_t KEY_SIZE = 32, INDEX_SIZE = 104, READ_CAP_SIZE = 136, HASH_SIZE = 32, ROSTER_MAX = 256,
                  PREFIX_SIZE = 8, MAX_NAME_CHARS = 30;
-constexpr uint64_t CURRENT_VERSION = 4, MAP_VERSION = 3;
+// Written: CURRENT_VERSION; arrays from ARRAY_VERSION, maps up to MAP_VERSION; MSG_PACKED from PACKED_VERSION.
+constexpr uint64_t CURRENT_VERSION = 5, ARRAY_VERSION = 4, MAP_VERSION = 3, PACKED_VERSION = 5;
 constexpr uint64_t MSG_TEXT = 0, MSG_INTRODUCTION = 1, MSG_FILE_UPLOAD = 2, MSG_WHO = 3, MSG_REPLY_WHO = 4,
-                   MSG_CONTROL = 10, MSG_PING = 11;  // a ping: content with a null body
+                   MSG_CONTROL = 10, MSG_PING = 11,  // a ping: content with a null body
+                   MSG_PACKED = 12;                  // several texts in one box, their array as body
 
 // ---- CBOR, byte level ----
 
@@ -98,6 +100,7 @@ struct Gcm {
     Bytes membership_hash;
     uint64_t msg_type = 0;
     std::optional<std::string> text;
+    std::vector<std::string> texts;  // MSG_PACKED's
     std::optional<Introduction> introduction;
     std::vector<RawField> other;
     std::optional<Bytes> acks, numbers, introduced_at;
@@ -125,7 +128,11 @@ Bytes text_content(const Bytes& membership_hash, const std::string& s, uint64_t 
 Bytes ping_content(const Bytes& membership_hash, uint64_t version);
 // (version, msg_type) of an array-form message refused for being newer or of an unknown type.
 std::optional<std::pair<uint64_t, uint64_t>> unsupported(const Bytes& cbor);
+// A text or packed message's CBOR with text packed in after what it holds; nullopt for any other.
+std::optional<Bytes> pack(const Bytes& cbor, const std::string& text);
 std::string text_of(const Bytes& content);
+// A line for each message packed in content.
+std::vector<std::string> texts_of(const Bytes& content);
 
 // A box's first byte: F a message, C a chunk, I a long message's chunk stream.
 struct Chunk {
@@ -158,6 +165,8 @@ std::optional<Bytes> put_payload(const Bytes& cbor, const Bytes& payload);
 // A message too long for a box of max bytes goes to a substream: C boxes, then an F box.
 inline size_t chunk_count(size_t n, size_t max) { return (n + (max - 2)) / (max - 1); }
 inline size_t max_chunks(size_t max, size_t max_file = MAX_FILE) { return chunk_count(max_file + max, max); }
+// The smallest box a substream is read from, an I box: a reader takes substreams cut to any size.
+constexpr size_t MIN_BOX = 1 + 4 + READ_CAP_SIZE;
 Bytes substream_box(const Bytes& blob, size_t max, size_t i);
 // The I box naming a substream of total boxes.
 Bytes indirection(size_t total, const Bytes& read_cap);

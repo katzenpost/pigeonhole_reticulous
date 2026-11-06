@@ -1,9 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #include "kq_wire.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace kq::wire {
+
+std::vector<size_t> allowed_sizes(const std::vector<size_t>& extra) {
+    std::vector<size_t> out{kBoxMesh, kBoxMixnet};
+    for (size_t n : extra)
+        if (n >= kMinBox && n <= kMaxBox) out.push_back(n);
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+size_t fit_size(const std::vector<size_t>& allowed, size_t writer, size_t n) {
+    if (n <= writer) return writer;
+    for (size_t s : allowed)
+        if (n <= s) return s;
+    return 0;
+}
 
 std::optional<Bytes> pad(const uint8_t* data, size_t len, size_t box_size) {
     if (len > box_size) return std::nullopt;
@@ -22,6 +39,12 @@ std::optional<Bytes> unpad(const uint8_t* p, size_t len) {
 
 Bytes read_query(const uint8_t box_id[32]) {
     Bytes q{0};
+    q.insert(q.end(), box_id, box_id + 32);
+    return q;
+}
+
+Bytes subscribe_query(const uint8_t box_id[32], uint16_t ttl) {
+    Bytes q{kSubscribe, (uint8_t)(ttl >> 8), (uint8_t)ttl};
     q.insert(q.end(), box_id, box_id + 32);
     return q;
 }

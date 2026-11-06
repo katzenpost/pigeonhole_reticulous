@@ -7,6 +7,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
 
 #include "kq1_engine.h"
 #include "kq_replica.h"
@@ -36,16 +37,20 @@ public:
     void tick(int64_t now_s, uint64_t now_ms);
     std::optional<uint64_t> next_due() const;
     bool busy() const { return !ready_.empty(); }
+    // The box with this ID was pushed, or will not be: what waits for it is due now.
+    void pushed(const Bytes& box_id);
 
 private:
     struct Later {
         uint64_t due;
         std::optional<kq1::Action> act;
         std::optional<kq1::Input> in;
+        Bytes until;
     };
     void release(kq1::StepResult&& r);
     std::deque<kq1::Action> ready_;
     std::vector<Later> later_;
+    std::set<Bytes> early_;  // pushed before what waits for them was handed back
 };
 
 // Runs fn on the task that owns the replica client and waits until it calls done.
@@ -61,6 +66,7 @@ public:
     std::optional<size_t> max_plaintext() override { return client_.box_size(); }
     std::optional<kq1::Minted> voucher_mint(const Bytes& write_cap, const std::string& name, uint8_t form) override;
     std::optional<std::pair<Bytes, Bytes>> voucher_derive_stream(const Bytes& voucher) override;
+    std::optional<Bytes> watch(const Bytes& read_cap, const kq1::Index& index) override;
     std::optional<kq1::Inducted> voucher_induct(const Bytes& voucher, const Bytes& payload, const Bytes& who_reply) override;
     std::optional<kq1::Opened> voucher_open(const Bytes& secret_key, const Bytes& sealed, const Bytes& write_cap) override;
     std::string error() const override { return error_; }

@@ -12,7 +12,7 @@ def flat(v):
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (dict, list)):
-        return json.dumps(v, separators=(",", ":"))
+        return json.dumps(v, separators=(",", ":"), ensure_ascii=False)  # kq_json reads no \u surrogate pairs
     return str(v)
 
 
@@ -20,11 +20,16 @@ out = []
 for path in sys.argv[1:]:
     tag = os.path.relpath(path, os.path.dirname(os.path.abspath(__file__))).replace("vectors/", "")
     doc = json.load(open(path))
-    if isinstance(doc, dict) and ("messages" in doc or "valid" in doc):  # katzenqt1: sections of lists
+    if isinstance(doc, dict) and ("messages" in doc or "valid" in doc or "packed" in doc):  # katzenqt1: sections of lists
         vectors = [(sect + "/" + str(v.get("name", i)), dict(v, section=sect))
                    for sect, lst in doc.items() if isinstance(lst, list) for i, v in enumerate(lst)]
     elif isinstance(doc, dict) and "queries" in doc:  # pigeonhole_rns bridge vectors: one list per kind
         vectors = [(k + "/" + v["name"], v) for k in ("queries", "replies", "malformed", "boxes") for v in doc[k]]
+    elif isinstance(doc, dict) and ("pushes" in doc or "mixed_stream" in doc):  # push and box size vectors
+        vectors = [(k, v) for k, v in doc.items() if isinstance(v, dict)]
+        vectors += [(k + "/" + str(v.get("name", i)), dict(v, section=k))
+                    for k, lst in doc.items() if isinstance(lst, list) for i, v in enumerate(lst) if isinstance(v, dict)]
+        vectors.append(("top", {k: v for k, v in doc.items() if not isinstance(v, (dict, list))}))
     elif isinstance(doc, dict) and "vectors" in doc:
         vectors = [(str(v.get("name", i)), v) for i, v in enumerate(doc["vectors"])]
     elif isinstance(doc, dict):  # one vector per section, named by it

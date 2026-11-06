@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // A client of one Pigeonhole replica in Channel mode: box reads and writes become queries cut
 // into frames, replies are matched to them by request id. No I/O: the owner hands it each
-// Channel message that arrives and sends the frames it is given.
+// Channel message that arrives and sends the frames it is given. Boxes are written at the mesh
+// size and read at any allowed size; on a replica serving push, a box not yet written is
+// subscribed to and pushed once it is.
 #pragma once
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
 
 #include "kq_bacap.h"
 #include "kq_wire.h"
@@ -29,16 +32,29 @@ public:
     static constexpr size_t kMaxInFlight = 2;
     static constexpr uint32_t kTimeoutMs = 60000;
 
-    ReplicaClient(size_t box_size, Send send, size_t piece = wire::piece_size(500))
-        : box_size_(box_size), piece_(piece), send_(std::move(send)) {}
+    // box_size: the size written; extra: sizes read besides wire::allowed_sizes' own.
+    ReplicaClient(size_t box_size, Send send, std::vector<size_t> extra = {}, size_t piece = wire::piece_size(500));
 
     size_t box_size() const { return box_size_; }
-    // false when the plaintext exceeds the box size.
+    const std::vector<size_t>& sizes() const { return sizes_; }
+    // false when the plaintext exceeds every allowed size.
     bool write(const bacap::WriteCap& w, const bacap::Index& idx, const Bytes& plaintext, WriteDone done);
     void tombstone(const bacap::WriteCap& w, const bacap::Index& idx, WriteDone done);
     void read(const uint8_t root_pk[32], const bacap::Index& idx, ReadDone done);
 
+    // Whether the replica announced push (wire::kPushFlag).
+    void set_push(bool on) { push_ = on; }
+    bool push() const { return push_; }
+    // Subscribes to the box at idx: done gets its Box ID once the replica took the subscription,
+    // nothing when it cannot push. Once the box is pushed, or the Channel closes, that ID is in
+    // take_woken(), and a read of a pushed box needs no query.
+    void subscribe(const uint8_t root_pk[32], const bacap::Index& idx, std::function<void(std::optional<Bytes>)> done);
+    std::vector<Bytes> take_woken();
+    unsigned pushes = 0;  // pushes taken
+
     void on_message(const uint8_t* p, size_t n, uint32_t now_ms);
+    // A Channel message of MSGTYPE wire::kPushMsgType.
+    void on_push(const uint8_t* p, size_t n, uint32_t now_ms);
     // Fails requests unanswered for kTimeoutMs; they are asked again by their owner, later.
     void tick(uint32_t now_ms);
     // The Channel closed: every request fails, queued ones too.
@@ -52,14 +68,26 @@ private:
         bool write = false;
         Bytes query;
         std::function<void(const std::optional<wire::Reply>&)> on_reply;
+        // A subscribe's reply is not a read's: raw, it goes to on_raw undecoded.
+        bool raw = false;
+        std::function<void(const std::optional<Bytes>&)> on_raw;
         uint32_t sent_at = 0;
+        void answer(std::optional<Bytes> reply) {
+            if (raw) on_raw(reply);
+            else on_reply(reply ? wire::decode_reply(reply->data(), reply->size()) : std::nullopt);
+        }
     };
     void enqueue(Req r);
     void pump(uint32_t now_ms);
 
     size_t box_size_, piece_;
+    std::vector<size_t> sizes_;
     Send send_;
-    bool up_ = false;
+    bool up_ = false, push_ = false;
+    std::set<Bytes> waiting_;          // Box IDs subscribed to
+    std::map<Bytes, wire::Reply> pushed_;  // pushed and not yet read
+    std::vector<Bytes> woken_;
+    wire::Reassembler push_reasm_;
     uint16_t next_id_ = 1;
     uint32_t now_ = 0;
     std::deque<Req> queue_;

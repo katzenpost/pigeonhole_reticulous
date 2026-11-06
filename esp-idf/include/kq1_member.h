@@ -293,6 +293,10 @@ struct Group {
     std::vector<Outgoing> compose(std::optional<Bytes> content);
     void written(size_t token, const Index& index, std::optional<Payload> plaintext);
     void abandoned(size_t token);
+    // Whether a control message is owed, to go ahead of the next content.
+    bool owes() const { return owes_control(); }
+    // A control message carrying what is owed, acknowledgements among it; none when nothing is.
+    std::vector<Outgoing> acknowledge();
     std::vector<Outgoing> begin_induction();
     void cancel_induction() { release(); }
     Outgoing introduce_now(const std::string& name, const Bytes& read_cap);
@@ -322,6 +326,7 @@ private:
                                  const std::optional<Index>& next);
     size_t size() const;
     bool owes_control() const;
+    bool owes_acks() const;
     std::vector<std::pair<At, Key>> numberable() const;
     std::pair<Message, Pending> control();
     void release();

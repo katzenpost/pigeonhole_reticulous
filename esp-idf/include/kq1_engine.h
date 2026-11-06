@@ -6,6 +6,8 @@
 // to a substream of its own, which an I box in the member's stream names.
 #pragma once
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 
@@ -65,6 +67,7 @@ struct Input {
         // name, its bytes added as they come, ended. Its chunks are written as they fill.
         STREAM_START, STREAM_DATA, STREAM_END,
         PING,  // a ping to the chat: its radio listeners play their ping sound
+        TICK,  // a receipt is due for what came in unreceipted, numbered n
     } kind;
     explicit Input(Kind k) : kind(k) {}
     ChatId chat;
@@ -84,25 +87,26 @@ struct Input {
     Opened opened;                           // OPENED
     Bytes voucher, voucher_write_cap, payload;  // JOINER_PAYLOAD
     Inducted inducted;                       // SEALED_REPLY
-    size_t n = 0;                            // EPOCH; WROTE_CHUNK the box
+    size_t n = 0;                            // EPOCH; WROTE_CHUNK the box; TICK
 };
 
 struct Action {
     enum Kind {
         CREATE, WRITE, READ, WAKE, SCAN_READ, WALK, DERIVE, MINT, AWAIT_REPLY, READ_VOUCHER, SEAL, PUBLISH,
         DELETE, LOAD, SUBSTREAM, WRITE_CHUNK, CHUNK_INDEXES, READ_CHUNK,
+        TICK,  // send TICK after ms
     } kind;
     explicit Action(Kind k) : kind(k) {}
     ChatId chat;
     bool joining = false;            // CREATE
     size_t job = 0;                  // WRITE, LOAD, SUBSTREAM, WRITE_CHUNK, CHUNK_INDEXES
-    size_t n = 0;                    // WRITE_CHUNK: the box
+    size_t n = 0;                    // WRITE_CHUNK: the box; TICK
     Bytes write_cap;                 // WRITE, MINT, AWAIT_REPLY, WRITE_CHUNK
     Index index;                     // WRITE, READ, SCAN_READ, WRITE_CHUNK, READ_CHUNK
     Bytes box;                       // WRITE, WRITE_CHUNK
     Key stream;                      // READ, WAKE, SCAN_READ, WALK, DERIVE, READ_CHUNK
     Bytes read_cap;                  // READ, SCAN_READ, READ_CHUNK
-    uint64_t ms = 0;                 // WAKE
+    uint64_t ms = 0;                 // WAKE, TICK
     Index start;                     // WALK, DERIVE, CHUNK_INDEXES
     std::vector<uint64_t> targets;   // WALK
     size_t keep = 0, count = 0;      // WALK keep, DERIVE and CHUNK_INDEXES count
@@ -156,6 +160,7 @@ struct Job {
     Bytes box;  // an upload's I box, once its substream is written
     std::optional<size_t> line;
     std::optional<Upload> upload;
+    std::vector<size_t> packed;  // the lines of the messages packed in after line's
 };
 struct Attachment {
     std::string name, filetype;
@@ -227,6 +232,8 @@ struct State {
 };
 
 constexpr size_t WINDOW = 8;
+// How long what we read waits for a message of ours to acknowledge it before a control message does.
+constexpr uint64_t RECEIPT_DELAY = 30000;
 uint64_t backoff(size_t n);
 // How often a radio group's members are polled: a burst is heard about this long after it lands.
 constexpr uint64_t RADIO_POLL_MS = 1000;
@@ -249,6 +256,10 @@ public:
     // Groups listened to as radio: their streams are polled every RADIO_POLL_MS, not backed off,
     // and the audio/opus files others send there are clips, not lines or files kept.
     std::set<ChatId> radio;
+    // Pack a text sent into the one before it while that is not yet being written and both fit a box.
+    bool pack = true;
+    // RECEIPT_DELAY, or 0 to acknowledge only in messages the user sends.
+    uint64_t receipt_delay = RECEIPT_DELAY;
 
     Engine(State s, size_t max) : state(std::move(s)), max_plaintext(max) {}
     StepResult step(int64_t now, const Input& input);
@@ -276,6 +287,10 @@ private:
         struct Stream { Bytes data, tail; size_t header = 0; };
         std::map<JobKey, Stream> streams;
         std::map<std::pair<ChatId, std::string>, size_t> stream_jobs;  // by its name
+        // The content come in that no message of ours acknowledged yet, numbered from receipts,
+        // by chat; and the number each chat has a TICK out for.
+        std::map<ChatId, size_t> unreceipted, ticking;
+        size_t receipts = 0;
         void forget(const ChatId& chat);
     } flight_;
     struct Cx;
@@ -304,15 +319,29 @@ struct Backend {
     virtual std::optional<Inducted> voucher_induct(const Bytes& voucher, const Bytes& payload, const Bytes& who_reply) = 0;
     virtual std::optional<Opened> voucher_open(const Bytes& secret_key, const Bytes& sealed, const Bytes& write_cap) = 0;
     virtual std::string error() const { return "failed"; }
+    // Asks to be pushed the box at index once it is written: what the caller is told when it is
+    // (its Box ID), or nothing when this transport cannot push and the caller polls.
+    virtual std::optional<Bytes> watch(const Bytes&, const Index&) { return std::nullopt; }
 };
 
 constexpr uint64_t RETRY_MS = 5000;
+// How long a stream waiting for a box the transport will push reads again anyway, in case the push
+// was lost; the read subscribes again.
+constexpr uint64_t PUSHED_POLL_MS = 300000;
 
 struct Done {
     enum Kind { DONE, RETRY, LATER, NOTHING } kind = NOTHING;
     std::optional<Input> input;   // DONE, LATER
     std::optional<Action> action; // RETRY
     uint64_t ms = 0;              // RETRY, LATER
+    Bytes until;                  // LATER: due at once when this box is pushed
+};
+
+// Per chat and stream, the box it last missed and was promised a push of. Executors running at
+// once share one.
+struct Watched {
+    std::mutex mu;
+    std::map<std::pair<ChatId, Key>, Bytes> boxes;
 };
 
 // The files the engine keeps, for its DELETE and LOAD.
@@ -325,9 +354,11 @@ struct Executor {
     Backend& backend;
     std::function<void(uint64_t)> sleep;  // between attempts at a write that must land
     Files files = {};
+    std::shared_ptr<Watched> watched = std::make_shared<Watched>();
     Done perform(const Action& a);
 
 private:
+    void watch(const Action& a, const Read& r);
     std::optional<Done> perform_or(const Action& a);
     Backend::Write publish(const Bytes& write_cap, const Index& index, const Bytes& b);
 };
