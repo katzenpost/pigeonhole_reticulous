@@ -79,8 +79,22 @@ lv_obj_t* mkScreen() {
     return o;
 }
 
+// A row scrolled partly above the body is not drawn at all, so none shows cut under the header.
+void trimTop(lv_event_t* e) {
+    lv_obj_t* b = lv_event_get_current_target_obj(e);
+    lv_area_t top, a;
+    lv_obj_get_coords(b, &top);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(b); i++) {
+        lv_obj_t* c = lv_obj_get_child(b, i);
+        lv_obj_get_coords(c, &a);
+        lv_obj_set_style_opa(c, a.y1 < top.y1 ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    }
+}
+
 lv_obj_t* mkBody(lv_obj_t* screen) {
     lv_obj_t* b = lv_obj_create(screen);
+    lv_obj_add_event_cb(b, trimTop, LV_EVENT_SCROLL, nullptr);
+    lv_obj_add_event_cb(b, trimTop, LV_EVENT_SIZE_CHANGED, nullptr);
     lv_obj_remove_style_all(b);
     lv_obj_set_width(b, lv_pct(100));
     lv_obj_set_flex_grow(b, 1);
@@ -543,6 +557,8 @@ void drawChat(bool force) {
         }
     }
     if (bottom || force) lv_obj_scroll_to_y(s_log, LV_COORD_MAX, LV_ANIM_OFF);
+    lv_obj_update_layout(s_log);
+    lv_obj_send_event(s_log, LV_EVENT_SCROLL, nullptr);  // the rows are new
 }
 
 void onSend(lv_event_t*) {
