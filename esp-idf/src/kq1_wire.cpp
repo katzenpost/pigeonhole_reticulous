@@ -525,7 +525,7 @@ static std::optional<Gcm> from_array(const Bytes& b) {
     Gcm g;
     if (!read_array(l, n) || n < 4 || n > 7) return std::nullopt;
     if (!read_uint(l, g.version) || !read_bytes(l, g.membership_hash) || !read_uint(l, g.msg_type)) return std::nullopt;
-    if (g.version < CURRENT_VERSION || g.membership_hash.size() != HASH_SIZE || g.msg_type > MSG_CONTROL)
+    if (g.version < CURRENT_VERSION || g.membership_hash.size() != HASH_SIZE || g.msg_type > MSG_PING)
         return std::nullopt;
     if (g.msg_type == MSG_TEXT) {
         std::string s;
@@ -542,7 +542,7 @@ static std::optional<Gcm> from_array(const Bytes& b) {
         Bytes raw;
         if (!upload_map(l, raw)) return std::nullopt;
         g.other.push_back({"file_upload", raw});
-    } else if (g.msg_type == MSG_CONTROL) {
+    } else if (g.msg_type == MSG_CONTROL || g.msg_type == MSG_PING) {
         if (!is_null(l)) return std::nullopt;
         l.skip(1);
     } else if (is_null(l)) {
@@ -651,7 +651,7 @@ static std::optional<Gcm> from_map(const Bytes& b) {
     if (!msg_type)
         msg_type = g.introduction ? MSG_INTRODUCTION : has_other("file_upload") ? MSG_FILE_UPLOAD
                  : has_other("who") ? MSG_WHO : has_other("reply_who") ? MSG_REPLY_WHO : MSG_TEXT;
-    if (!version || !hash || *version > MAP_VERSION || hash->size() != HASH_SIZE || *msg_type > MSG_CONTROL)
+    if (!version || !hash || *version > MAP_VERSION || hash->size() != HASH_SIZE || *msg_type > MSG_PING)
         return std::nullopt;
     std::vector<RawField> other;
     for (auto k : kOtherKeys)
@@ -718,6 +718,14 @@ Bytes text_content(const Bytes& membership_hash, const std::string& s, uint64_t 
     g.membership_hash = membership_hash;
     g.msg_type = MSG_TEXT;
     g.text = s;
+    return g.to_bytes();
+}
+
+Bytes ping_content(const Bytes& membership_hash, uint64_t version) {
+    Gcm g;
+    g.version = version;
+    g.membership_hash = membership_hash;
+    g.msg_type = MSG_PING;
     return g.to_bytes();
 }
 

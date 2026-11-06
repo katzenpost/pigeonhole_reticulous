@@ -13,6 +13,7 @@ void Runtime::release(kq1::StepResult&& r) {
     steps++;
     if (on_file) for (auto& f : r.files) on_file(f);
     if (on_clip) for (auto& c : r.clips) on_clip(std::move(c));
+    if (on_ping) for (auto& p : r.pings) on_ping(p);
     for (auto& a : r.actions) ready_.push_back(a);
     if (on_changes && !r.changes.empty()) on_changes(r.changes);
 }
@@ -190,7 +191,8 @@ std::vector<KqChat> chats(const kq1::State& st, const std::string& only, bool li
 std::optional<kq1::Input> input_of(const std::string& verb, const std::string& group, const std::string& arg) {
     static const std::map<std::string, kq1::Input::Kind> kinds = {
         {"create", kq1::Input::CREATE}, {"join", kq1::Input::JOIN},   {"invite", kq1::Input::INDUCT},
-        {"send", kq1::Input::SEND},     {"scan", kq1::Input::SCAN},   {"leave", kq1::Input::LEAVE}};
+        {"send", kq1::Input::SEND},     {"scan", kq1::Input::SCAN},   {"leave", kq1::Input::LEAVE},
+        {"ping", kq1::Input::PING}};
     auto k = kinds.find(verb);
     if (k == kinds.end()) return std::nullopt;
     kq1::Input in(k->second);

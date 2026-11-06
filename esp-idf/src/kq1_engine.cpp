@@ -329,6 +329,10 @@ struct Engine::Cx {
         l.sender = sender;
         l.index = index;
         auto g = Gcm::from_bytes(content);
+        if (g && g->msg_type == MSG_PING) {
+            if (radio.count(c.id) && !(c.group && c.group->me() == sender)) out.pings.push_back({c.id, sender, label(c, sender)});
+            return;
+        }
         auto f = g ? file_of(*g) : std::nullopt;
         if (!f) {
             l.text = text_of(content);
@@ -1055,6 +1059,12 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             size_t line = cx.say(c, l);
             auto outg = c.group->compose(content);
             cx.enqueue(c, outg, content, line);
+            return;
+        }
+        case Input::PING: {
+            if (!c.group) return;
+            Bytes content = ping_content(c.group->membership(nullptr), wire_version);
+            cx.enqueue(c, c.group->compose(content), content, std::nullopt);
             return;
         }
         case Input::SEND_FILE: {
