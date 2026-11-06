@@ -43,6 +43,9 @@ std::string plain(const Notice& n) {
         case NoticeKind::NotFetched: return a(0) + " sent a message that could not be fetched";
         case NoticeKind::Desync:
             return "a box of our stream holds something else: is this group used from another client?";
+        case NoticeKind::Pinged: return a(0) + " pinged";
+        case NoticeKind::Unsupported:
+            return a(0) + " sent a message this app cannot show (type " + a(1) + ", version " + a(2) + "): update the app";
     }
     return "";
 }
@@ -329,6 +332,11 @@ struct Engine::Cx {
         l.sender = sender;
         l.index = index;
         auto g = Gcm::from_bytes(content);
+        if (g && g->msg_type == MSG_PING) {
+            notice(c, NoticeKind::Pinged, {label(c, sender)});
+            if (radio.count(c.id) && !(c.group && c.group->me() == sender)) out.pings.push_back({c.id, sender, label(c, sender)});
+            return;
+        }
         auto f = g ? file_of(*g) : std::nullopt;
         if (!f) {
             l.text = text_of(content);
@@ -414,7 +422,12 @@ struct Engine::Cx {
         auto ch = unframe(plaintext);
         if (ch.kind == Chunk::FINAL) {
             auto m = message_from_cbor(ch.data);
-            if (!m || !m->introduction) return;
+            if (!m) {
+                if (auto u = unsupported(ch.data))
+                    notice(c, NoticeKind::Unsupported, {label(c, stream), std::to_string(u->second), std::to_string(u->first)});
+                return;
+            }
+            if (!m->introduction) return;
             auto& i = *m->introduction;
             Key k = key_of(i.read_cap);
             if (!c.names.contains(k)) {
@@ -1055,6 +1068,12 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             size_t line = cx.say(c, l);
             auto outg = c.group->compose(content);
             cx.enqueue(c, outg, content, line);
+            return;
+        }
+        case Input::PING: {
+            if (!c.group) return;
+            Bytes content = ping_content(c.group->membership(nullptr), wire_version);
+            cx.enqueue(c, c.group->compose(content), content, std::nullopt);
             return;
         }
         case Input::SEND_FILE: {

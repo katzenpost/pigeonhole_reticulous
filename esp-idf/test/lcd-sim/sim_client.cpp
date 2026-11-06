@@ -23,6 +23,7 @@
 #include "kq_store.h"
 #include "kq_vault.h"
 #include "kq_ogg.h"
+#include "kq_ping_sounds.h"
 #include "kq_radio_feed.h"
 #include "kq_view.h"
 #include "fskv.h"
@@ -31,6 +32,7 @@
 #include "sim.h"
 
 void simHear(kq1::Clip&& c);
+void simPinged(const kq1::Ping& p);
 
 namespace {
 
@@ -143,6 +145,7 @@ void loadChats() {
     for (auto& p : problems) fprintf(stderr, "sim: not loaded: %s\n", p.c_str());
     fprintf(stderr, "sim: %zu chats loaded\n", g_rt->eng.state.chats.size());
     g_rt->on_clip = [](kq1::Clip&& c) { simHear(std::move(c)); };
+    g_rt->on_ping = [](const kq1::Ping& p) { simPinged(p); };
     g_rt->on_changes = [](const kq1::Changes& ch) {
         if (!g_store->commit(g_rt->eng.state, ch)) fprintf(stderr, "sim: saving the chats failed\n");
     };
@@ -220,6 +223,8 @@ std::vector<KqChat> kqChats(const std::string& only, bool lines) {
 namespace {
 std::vector<std::string> g_radio;
 KqRadio g_radioState;
+std::string g_ping;  // shown 10 s from g_pingAt
+uint64_t g_pingAt = 0;
 }
 
 void simHear(kq1::Clip&& c) {
@@ -263,7 +268,43 @@ KqRadio kqRadio() {
     r.talking = g_clock.on;
     r.talk_left_ms = g_clock.left_ms((uint32_t)nowMs());
     r.talk_max_ms = kq::radio::kTalkMaxMs;
+    if (!g_ping.empty() && nowMs() - g_pingAt < 10000) r.ping = g_ping;
     return r;
+}
+
+// Pings as the device makes them; a sound played goes to <state>/<name>.wav.
+namespace {
+kq::radio::PingGate g_pingOut, g_pingIn;
+void play(const char* name, const int16_t* pcm, size_t n) {
+    std::string path = g_stateDir + "/" + name + ".wav";
+    wav_write(path.c_str(), pcm, n);
+    fprintf(stderr, "sim: sound: played %s (%zu samples) into %s\n", name, n, path.c_str());
+}
+}  // namespace
+
+bool kqRadioPing() {
+    std::string talk = kqRadioTalk();
+    {
+        std::lock_guard<std::mutex> g(g_mu);
+        if (talk.empty() || !g_pingOut.take((uint32_t)nowMs())) return false;
+        g_ping = "Pinged " + talk;
+        g_pingAt = nowMs();
+    }
+    play("ping-sent", kPingSent, std::size(kPingSent));
+    kqCommand("ping", talk);
+    return true;
+}
+
+// Under g_mu, from the runtime.
+void simPinged(const kq1::Ping& p) {
+    time_t t = time(nullptr);
+    char at[8] = "";
+    struct tm tm;
+    if (t >= 1704067200 && localtime_r(&t, &tm)) strftime(at, sizeof at, "%H:%M", &tm);  // before 2024: unset
+    g_ping = p.who + " pinged" + (*at ? std::string(" at ") + at : "");
+    g_pingAt = nowMs();
+    fprintf(stderr, "sim: radio: %s in %s\n", g_ping.c_str(), p.chat.c_str());
+    if (g_pingIn.take((uint32_t)nowMs())) play("ping-heard", kPingHeard, std::size(kPingHeard));
 }
 
 void simTalk(bool down) {

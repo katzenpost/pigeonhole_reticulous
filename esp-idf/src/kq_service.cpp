@@ -61,6 +61,7 @@ static std::string hexOf(const uint8_t* p, size_t n) {
 static TaskHandle_t s_task = nullptr;
 #if CONFIG_STRADDLE_LXST
 void kqRadioHear(kq1::Clip&& c);  // the voice slice's (conditional/lxst/)
+void kqRadioPinged(const kq1::Ping& p);
 #endif
 static kq::ReplicaClient* s_client = nullptr;
 static unsigned s_sent = 0, s_sendFail = 0, s_recv = 0;
@@ -444,6 +445,7 @@ static void loadChats() {
     s_rt->eng.state = s_store->load(storageGetStr("s.kq.name", "kq"), &problems);
 #if CONFIG_STRADDLE_LXST
     s_rt->on_clip = [](kq1::Clip&& c) { kqRadioHear(std::move(c)); };
+    s_rt->on_ping = [](const kq1::Ping& p) { kqRadioPinged(p); };
 #endif
     s_rt->on_file = [](const kq1::FileWrite& f) {
         if (!s_vault->files().replace(f.file, std::string(f.bytes.begin(), f.bytes.end())))
@@ -539,7 +541,8 @@ void kqStream(const std::string& group, const std::string& name, KqStream step, 
 static void cliRadio(const std::string& how, const std::string& group) {
     if ((how == "on" || how == "off") && !group.empty()) kqRadioSet(group, how == "on");
     else if (how == "talk") kqRadioSetTalk(group);
-    else if (!how.empty()) { cliPrintf("kq radio [on <g> | off <g> | talk [<g>]]\n"); return; }
+    else if (how == "ping") cliPrintf(kqRadioPing() ? "pinged\n" : "not pinged: no talk group, or too soon\n");
+    else if (!how.empty()) { cliPrintf("kq radio [on <g> | off <g> | talk [<g>] | ping]\n"); return; }
     std::string gs;
     for (auto& g : kqRadioGroups()) gs += (gs.empty() ? "" : ", ") + g;
     KqRadio r = kqRadio();
@@ -549,6 +552,7 @@ static void cliRadio(const std::string& how, const std::string& group) {
     cliPrintf("playing: %s; queued %u, heard %u, missed %u\n", r.playing.empty() ? "-" : r.playing.c_str(), r.queued,
               r.heard, r.missed);
     if (!r.last.empty()) cliPrintf("last: %s\n", r.last.c_str());
+    if (!r.ping.empty()) cliPrintf("ping: %s\n", r.ping.c_str());
 }
 #endif
 
@@ -760,7 +764,7 @@ static void cliBench(const std::string& what) {
 }
 
 #if CONFIG_STRADDLE_LXST
-#define KQ_RADIO_USAGE " | radio [on <g> | off <g> | talk [<g>]]"
+#define KQ_RADIO_USAGE " | radio [on <g> | off <g> | talk [<g>] | ping]"
 #else
 #define KQ_RADIO_USAGE ""
 #endif

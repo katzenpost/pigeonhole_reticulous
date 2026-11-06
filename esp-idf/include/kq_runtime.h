@@ -20,6 +20,7 @@ public:
     std::function<void(const kq1::Changes&)> on_changes;
     std::function<void(const kq1::FileWrite&)> on_file;  // a file the engine keeps, written before its changes
     std::function<void(kq1::Clip&&)> on_clip;             // a radio burst, to play; never written anywhere
+    std::function<void(const kq1::Ping&)> on_ping;        // a radio ping, to sound
     // Engine steps taken so far: what a screen compares to know the state moved. Any task.
     std::atomic<uint32_t> steps{0};
 

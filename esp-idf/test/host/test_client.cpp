@@ -149,6 +149,7 @@ struct Client {
     std::shared_ptr<kq::Store> store = std::make_shared<kq::Store>(kq::memory_files(*files));
     std::shared_ptr<std::map<std::string, Bytes>> kept = std::make_shared<std::map<std::string, Bytes>>();  // its files
     std::vector<Clip> clips;  // radio bursts handed out to play
+    std::vector<Ping> pings;
 };
 
 static int g_saved = 0, g_unsaved = 0;
@@ -187,6 +188,7 @@ struct World {
         if (!same) fprintf(stderr, "%s: the saved state differs from the state after a step\n", m.name.c_str());
         for (auto& f : res.files) (*m.kept)[f.file] = f.bytes;
         for (auto& c : res.clips) m.clips.push_back(c);
+        for (auto& p : res.pings) m.pings.push_back(p);
         for (auto& a : res.actions) queue.push_back({i, a});
     }
     bool act() {
@@ -835,6 +837,68 @@ static void file_tests(const char* out_path) {
     }
 }
 
+// A ping is content: its readers get a notice, radio listeners hear it, nobody gets a line.
+static void ping_tests() {
+    Vec v{"client", "ping", {}};
+    World w;
+    found_and_join(w);
+    auto run = [&] { w.run_to(w.clock + 600000); };
+    auto ping = [&](size_t i) {
+        Input p(Input::PING);
+        p.chat = "g";
+        w.feed(i, p);
+        run();
+    };
+    auto lines = [&](size_t i) {
+        size_t n = 0;
+        for (auto& l : w.chat(i, "g")->log) n += !l.notice;
+        return n;
+    };
+    size_t a0 = lines(0), b0 = lines(1);
+    ping(0);
+    check(w.members[1].pings.empty() && noticed(w, 1, "~alice pinged") && !noticed(w, 0, "pinged"), v,
+          "not on the radio: a notice, and no sound");
+    for (auto& m : w.members) m.eng.radio.insert("g");
+    ping(0);
+    ping(0);
+    auto& p = w.members[1].pings;
+    check(p.size() == 2 && p[0].chat == "g" && p[0].who == "~alice" && p[0].sender == w.chat(0, "g")->group->me() &&
+              w.members[0].pings.empty(), v, "on the radio: each heard, from ~alice, not by its sender");
+    Input x(Input::SEND);
+    x.chat = "g";
+    x.text = "after the pings";
+    w.feed(0, x);
+    run();
+    check(says(w, 1, "after the pings") && lines(1) == b0 + 1 && lines(0) == a0 + 1, v,
+          "a message after them arrives, and they made no line");
+    ping(1);
+    const Line* sent = nullptr;
+    for (auto& l : w.chat(0, "g")->log) if (l.text == "after the pings") sent = &l;
+    check(w.members[0].pings.size() == 1 && w.members[0].pings[0].who == "~bob", v, "and back the other way");
+    check(sent && w.chat(0, "g")->acknowledged(*sent), v, "bob's ping carries his acks");
+
+    // A type this client does not know, written raw: a notice naming it, and what follows is read.
+    Chat* c = w.members[0].eng.state.chat("g");
+    Gcm g;
+    g.version = CURRENT_VERSION;
+    g.membership_hash = c->group->membership(nullptr);
+    g.msg_type = 12;
+    Bytes cbor = g.to_bytes();
+    for (auto& o : c->group->compose(cbor)) {
+        Job j;
+        j.id = c->fresh();
+        j.token = o.token;
+        j.box = frame(cbor);
+        c->jobs.push_back(j);
+    }
+    x.text = "after the unknown";
+    w.feed(0, x);
+    run();
+    check(says(w, 1, "after the unknown") &&
+              noticed(w, 1, "~alice sent a message this app cannot show (type 12, version 4): update the app"), v,
+          "an unknown type is noticed, and what follows it read");
+}
+
 int main() {
     if (sodium_init() < 0) return 2;
     const char* env = getenv("KQ1_TESTDATA");
@@ -871,6 +935,7 @@ int main() {
         }
     }
     file_tests(getenv("KQ_FILES_OUT"));
+    ping_tests();
     if (const char* out = getenv("KQ_FILES_OUT")) {
         FILE* f = fopen(out, "w");
         if (f) {

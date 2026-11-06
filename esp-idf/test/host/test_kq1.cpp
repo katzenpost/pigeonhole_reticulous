@@ -112,6 +112,10 @@ int main(int, char** argv) {
                 } else {
                     check(w->to_map_bytes() == cbor, v, "map encoding");
                 }
+            } else if (sect == "unsupported") {
+                auto u = unsupported(v.hex("cbor"));
+                std::string want = v.s("version") == "null" ? "null" : v.s("version") + "," + v.s("msg_type");
+                check((u ? std::to_string(u->first) + "," + std::to_string(u->second) : "null") == want, v, "unsupported");
             } else if (sect == "malformed") {
                 auto cbor = v.hex("cbor");
                 check(!Gcm::from_bytes(cbor) && !message_from_cbor(cbor), v, "refused");
@@ -194,5 +198,10 @@ int main(int, char** argv) {
     check(chunk_count(1548, 1549) == 1 && chunk_count(1549, 1549) == 2 && chunk_count(3096, 1549) == 2 &&
               chunk_count(3097, 1549) == 3, v, "chunk counts at the edges");
     check(!take_payload(text) && !put_payload(text, Bytes{1}), v, "a text has no payload");
+
+    // A ping, as the vectors' "ping": msg_type 11, a null body.
+    Bytes pc = unhex("840458204592987f08d443913f3f0d0cc916a79db26d468c256676536cb19ce851a593c90bf6");
+    check(ping_content(Bytes(pc.begin() + 4, pc.begin() + 36), CURRENT_VERSION) == pc &&
+              Gcm::from_bytes(pc)->msg_type == MSG_PING, v, "a ping");
     return finish("kq1");
 }

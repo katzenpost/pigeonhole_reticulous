@@ -160,6 +160,11 @@ int main(int, char**) {
     check(tc.left_ms(0x00000100u) == 120000 - 0x200, v, "across the millisecond clock's wrap");
     tc.stop();
     check(tc.left_ms(0x00000100u) == 0, v, "stopped");
+    PingGate pg;
+    check(pg.take(0) && !pg.take(1) && !pg.take(2999) && pg.take(3000) && !pg.take(5999) && pg.take(6500), v,
+          "a ping at most every 3 s");
+    pg = PingGate{};
+    check(pg.take(0xFFFFFF00u) && !pg.take(0x00000100u) && pg.take(0xFFFFFF00u + 3000), v, "across the wrap");
     if (const char* out = getenv("KQ_OGG_OUT")) {
         FILE* f = fopen(out, "wb");
         if (f) { fwrite(burst.data(), 1, burst.size(), f); fclose(f); }

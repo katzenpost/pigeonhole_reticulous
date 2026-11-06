@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // The Radio screen, on the lcd task: the joined groups, each off, listened to, or talked to too
-// (Enter), and a panel of fixed height for what is happening: talking (a red band), playing, or
-// how the last burst went. The look is Group Chat's (kq_theme.h).
+// (Enter), and a panel of fixed height for what is happening: talking (a red band), playing, a ping, or
+// how the last burst went. P pings the talk group. The look is Group Chat's (kq_theme.h).
 #include "kq_radio_app.h"
 
 #if CONFIG_SPANGAP_LCD
@@ -51,6 +51,12 @@ void onToggle(lv_event_t* e) {
 
 void onFree(lv_event_t* e) { delete static_cast<std::string*>(lv_event_get_user_data(e)); }
 
+// P pings the talk group, whichever row has focus.
+void onKey(lv_event_t* e) {
+    uint32_t k = lv_event_get_key(e);
+    if (k == 'p' || k == 'P') kqRadioPing();
+}
+
 void drawList() {
     auto on = kqRadioGroups();
     std::string talk = kqRadioTalk(), key = talk + "\n";
@@ -82,6 +88,7 @@ void drawList() {
         auto* id = new std::string(c.id);
         lv_obj_add_event_cb(r, onToggle, LV_EVENT_CLICKED, id);
         lv_obj_add_event_cb(r, onFree, LV_EVENT_DELETE, id);
+        lv_obj_add_event_cb(r, onKey, LV_EVENT_KEY, nullptr);
         if (lcdInputGroup()) {
             lv_group_add_obj(lcdInputGroup(), r);
             if (c.id == s_focus) lv_group_focus_obj(r);
@@ -123,6 +130,9 @@ void refresh(lv_timer_t*) {
     } else if (r.talking) {
         tc = 0xFFFFFF;
         t = "Let go of Mic to send.";
+    } else if (!r.ping.empty()) {
+        tc = 0xFFFFFF;
+        t = r.ping;
     } else {
         t = !r.last.empty() ? r.last : !talk.empty() ? "Hold Mic to talk to " + talk
             : on ? "Choose a group to talk to it too." : "Choose a group to listen to it.";
@@ -199,7 +209,7 @@ void KqRadioApp::onCreate(lv_obj_t* root) {
     lv_obj_set_style_border_side(hint, LV_BORDER_SIDE_TOP, 0);
     lv_obj_set_style_border_width(hint, 1, 0);
     lv_obj_set_style_border_color(hint, lv_color_hex(C_RULE), 0);
-    label(hint, "Enter: off \xE2\x86\x92 listen \xE2\x86\x92 talk here    Mic: hold to talk", C_SUB, kSmall);
+    label(hint, "Enter: off \xE2\x86\x92 listen \xE2\x86\x92 talk here    Mic: hold to talk    P: ping", C_SUB, kSmall);
     s_shown.clear();
     s_seen = 0;
     refresh(nullptr);

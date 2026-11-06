@@ -19,7 +19,7 @@ constexpr size_t KEY_SIZE = 32, INDEX_SIZE = 104, READ_CAP_SIZE = 136, HASH_SIZE
                  PREFIX_SIZE = 8, MAX_NAME_CHARS = 30;
 constexpr uint64_t CURRENT_VERSION = 4, MAP_VERSION = 3;
 constexpr uint64_t MSG_TEXT = 0, MSG_INTRODUCTION = 1, MSG_FILE_UPLOAD = 2, MSG_WHO = 3, MSG_REPLY_WHO = 4,
-                   MSG_CONTROL = 10;
+                   MSG_CONTROL = 10, MSG_PING = 11;  // a ping: content with a null body
 
 // ---- CBOR, byte level ----
 
@@ -122,6 +122,9 @@ std::optional<Message> message_from_cbor(const Bytes& cbor);
 std::optional<Gcm> message_to_gcm(const Message& m, uint64_t version);
 std::optional<Bytes> box_of(const Message& m, uint64_t version);
 Bytes text_content(const Bytes& membership_hash, const std::string& s, uint64_t version);
+Bytes ping_content(const Bytes& membership_hash, uint64_t version);
+// (version, msg_type) of an array-form message refused for being newer or of an unknown type.
+std::optional<std::pair<uint64_t, uint64_t>> unsupported(const Bytes& cbor);
 std::string text_of(const Bytes& content);
 
 // A box's first byte: F a message, C a chunk, I a long message's chunk stream.

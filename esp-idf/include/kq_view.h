@@ -38,6 +38,7 @@ struct KqRadio {
     bool cut = false;        // the burst reached the most it lasts and was sent; the key is still held
     unsigned queued = 0, heard = 0, missed = 0;
     std::string last;        // the last burst: who, how long, how soon after it was fetched it was heard
+    std::string ping;        // for a while after a ping: "Pinged field-team", "~kate pinged at 18:55"
 };
 KqRadio kqRadio();
 std::vector<std::string> kqRadioGroups();
@@ -45,6 +46,9 @@ void kqRadioSet(const std::string& group, bool on);
 // The radio group our bursts go to while the talk key is held, or none; one of kqRadioGroups().
 std::string kqRadioTalk();
 void kqRadioSetTalk(const std::string& group);
+// A ping to the talk group: our ping sound now, and theirs on members listening to it as radio.
+// false, and nothing sent, with no talk group or within kPingGapMs of the last one.
+bool kqRadioPing();
 // A burst sent to a group as it is made: started with its name, its bytes added as they come,
 // ended (with the last of them); its chunks go out as they fill. Held in memory only.
 enum class KqStream { START, DATA, END };
@@ -65,6 +69,9 @@ bool kqSoundBusy();  // sending or listening: the radio holds its bursts meanwhi
 void kqSoundSend(const std::string& code);
 void kqSoundListen();
 void kqSoundStop();  // and back to IDLE from HEARD or FAILED
+// A short clip (16 kHz mono PCM16, kept by the caller) mixed into the speaker now, cutting off the
+// one before; dropped while a voucher goes by sound.
+void kqSoundPlay(const int16_t* pcm, size_t n);
 
 // Whether the chats can be read yet: at first start the user chooses whether a passphrase
 // protects them; with one, they stay locked after every start until it is given.

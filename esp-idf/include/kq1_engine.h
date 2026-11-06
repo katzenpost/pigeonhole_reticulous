@@ -48,7 +48,7 @@ enum class NoticeKind {
     NameTaken, NameTakenJoining, Minting, NewGroup, VoucherMinted, ReplyUnreadable, Joined, NotJoinedYet,
     AlreadyAdding, NotAVoucher, ReadingVoucher, Added, NotJoined, FileTooLarge, SendLost, FileTooLargeToFetch,
     Scanning, NoLongerMember, StoppedReading, Renamed, ActionFailed, TooLong, NotWritten, MemberAdded, Unreadable,
-    NotFetched, Desync,
+    NotFetched, Desync, Pinged, Unsupported,
 };
 struct Notice { NoticeKind kind; std::vector<std::string> args; };
 std::string plain(const Notice& n);
@@ -64,6 +64,7 @@ struct Input {
         // A file sent as it is made, a radio burst while the talk key is held: started with its
         // name, its bytes added as they come, ended. Its chunks are written as they fill.
         STREAM_START, STREAM_DATA, STREAM_END,
+        PING,  // a ping to the chat: its radio listeners play their ping sound
     } kind;
     explicit Input(Kind k) : kind(k) {}
     ChatId chat;
@@ -118,6 +119,8 @@ struct Action {
 struct FileWrite { std::string file; Bytes bytes; };
 // A voice burst heard in a radio group: held in memory to be played, never kept.
 struct Clip { ChatId chat; Key sender; std::string who, name; Bytes bytes; };  // who: ~name, as notices say
+// A ping heard in a radio group.
+struct Ping { ChatId chat; Key sender; std::string who; };
 // What a step changed, for the caller to save: chats, and log lines changed or dropped.
 struct Changes {
     std::set<ChatId> chats, removed;
@@ -127,6 +130,7 @@ struct Changes {
 struct StepResult {
     std::vector<FileWrite> files;
     std::vector<Clip> clips;
+    std::vector<Ping> pings;
     Changes changes;
     std::vector<Action> actions;
 };

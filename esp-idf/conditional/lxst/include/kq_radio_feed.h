@@ -53,6 +53,19 @@ struct TalkClock {
     bool expired(uint32_t now_ms) const { return on && left_ms(now_ms) == 0; }
 };
 
+// A ping at most every kPingGapMs: ours sent, and others' sounded.
+constexpr uint32_t kPingGapMs = 3000;
+struct PingGate {
+    uint32_t last = 0;
+    bool any = false;
+    bool take(uint32_t now_ms) {
+        if (any && now_ms - last < kPingGapMs) return false;
+        last = now_ms;
+        any = true;
+        return true;
+    }
+};
+
 // One burst of ours: the frames lxst hands out in LXST_EV_BATCH messages while the talk key is
 // held, made into Ogg Opus page by page as they come, to be sent as it is made. Only the page
 // being filled is held here; the pages made wait in take() for the engine's stream.

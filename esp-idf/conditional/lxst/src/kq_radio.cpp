@@ -4,8 +4,10 @@
 // there is something to play, since partyline and calls share it.
 #include "kq_radio.h"
 
+#include <ctime>
 #include <cstring>
 #include <deque>
+#include <iterator>
 
 #include "esp_heap_caps.h"
 #include "esp_random.h"
@@ -17,6 +19,7 @@
 #include "spangap.h"
 
 #include "kq1_engine.h"
+#include "kq_ping_sounds.h"
 #include "kq_radio_feed.h"
 #include "kq_view.h"
 
@@ -72,6 +75,17 @@ std::string s_burst, s_burstTo;    // the burst being made, and the group it goe
 uint32_t s_upAt = 0;
 
 uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+// Pings: ours rate-limited, others' sounded at most as often; the last one shown a while. Under s_mu.
+constexpr uint32_t kPingShowMs = 10000;
+kq::radio::PingGate s_pingOut, s_pingIn;
+std::string s_ping;
+uint32_t s_pingAt = 0;
+
+void showPing(const std::string& s) {
+    s_ping = s;
+    s_pingAt = nowMs();
+}
 
 void release(Burst& b) {
     heap_caps_free(b.data);
@@ -306,9 +320,41 @@ void kqRadioHear(kq1::Clip&& c) {
     if (s_task) xTaskNotifyGive(s_task);
 }
 
+bool kqRadioPing() {
+    std::string talk = kqRadioTalk();
+    if (!s_mu || talk.empty()) return false;
+    {
+        Lock g;
+        if (!s_pingOut.take(nowMs())) return false;
+        showPing("Pinged " + talk);
+    }
+    kqSoundPlay(kPingSent, std::size(kPingSent));
+    kqCommand("ping", talk);
+    info("kq radio: pinged %s", talk.c_str());
+    return true;
+}
+
+// On the kq task. The time it came, if the clock is set.
+void kqRadioPinged(const kq1::Ping& p) {
+    if (!s_mu) return;
+    time_t t = time(nullptr);
+    char at[8] = "";
+    struct tm tm;
+    if (t >= 1704067200 && localtime_r(&t, &tm)) strftime(at, sizeof at, "%H:%M", &tm);  // before 2024: unset
+    bool play;
+    {
+        Lock g;
+        play = s_pingIn.take(nowMs());
+        showPing(p.who + " pinged" + (*at ? std::string(" at ") + at : ""));
+    }
+    if (play) kqSoundPlay(kPingHeard, std::size(kPingHeard));
+    info("kq radio: %s pinged %s%s", p.who.c_str(), p.chat.c_str(), play ? "" : " (not sounded: one just was)");
+}
+
 KqRadio kqRadio() {
     Lock g;
     KqRadio r = s_st;
+    if (!s_ping.empty() && nowMs() - s_pingAt < kPingShowMs) r.ping = s_ping;
     r.talk_left_ms = s_clock.left_ms(nowMs());
     r.talk_max_ms = kq::radio::kTalkMaxMs;
     return r;

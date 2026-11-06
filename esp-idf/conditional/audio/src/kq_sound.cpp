@@ -37,7 +37,9 @@ struct Lock {
     ~Lock() { xSemaphoreGive(s_mu); }
 };
 KqSound s_st;
-enum Cmd { NONE, SEND, LISTEN, STOP } s_cmd = NONE;
+enum Cmd { NONE, SEND, LISTEN, STOP, PLAY } s_cmd = NONE;
+const int16_t* s_cmdPcm = nullptr;  // PLAY
+size_t s_cmdN = 0;
 std::string s_cmdCode, s_last;  // the last transfer, for the CLI
 uint32_t s_until = 0;
 TaskHandle_t s_task = nullptr;
@@ -45,8 +47,9 @@ TaskHandle_t s_task = nullptr;
 int s_h = -1;  // the connection to the audio task
 uint8_t* s_msg = nullptr;
 int16_t* s_clip = nullptr;
-int s_sent = 0;
+int s_sent = 0, s_blocks = 0;  // of s_clip
 uint32_t s_t0 = 0;
+bool s_playing = false;        // a short clip (PLAY), not a voucher: s_st is left alone
 fskv_rx* s_rx = nullptr;
 int16_t* s_rxBuf = nullptr;
 int s_peak = 0;
@@ -64,6 +67,7 @@ void set(KqSound::State st, const std::string& code = "", const std::string& why
 void end() {
     if (s_h >= 0) itsDisconnect(s_h);
     s_h = -1;
+    s_playing = false;
     if (s_rx) pmBoostEnd();
     heap_caps_free(s_clip);
     heap_caps_free(s_rx);
@@ -125,8 +129,26 @@ void startSend(const std::string& code) {
     sodium_memzero(v->data(), v->size());
     if (!connect("pcm16,playback")) { fail("the speaker is in use"); return; }
     s_sent = 0;
+    s_blocks = kBlocks;
     s_t0 = nowMs();
     set(KqSound::SENDING);
+}
+
+// After the same quiet lead a voucher has, while the speaker comes up.
+void startPlay(const int16_t* pcm, size_t n) {
+    end();
+    s_blocks = kQuiet + (int)((n + kBlock - 1) / kBlock) + 1;
+    s_clip = (int16_t*)heap_caps_calloc(s_blocks * kBlock, 2, MALLOC_CAP_SPIRAM);
+    if (!s_clip) return;
+    memcpy(s_clip + kQuiet * kBlock, pcm, n * 2);
+    if (!connect("pcm16,playback")) {
+        end();
+        warn("kq sound: the speaker is in use; a ping is not played");
+        return;
+    }
+    s_sent = 0;
+    s_t0 = nowMs();
+    s_playing = true;
 }
 
 void startListen() {
@@ -159,14 +181,24 @@ void soundMain(void*) {
         Cmd c;
         std::string code;
         KqSound::State st;
+        const int16_t* pcm;
+        size_t pcmN;
         {
             Lock g;
             c = s_cmd;
             s_cmd = NONE;
+            pcm = s_cmdPcm;
+            pcmN = s_cmdN;
             code = s_cmdCode;
             sodium_memzero(s_cmdCode.data(), s_cmdCode.size());
             s_cmdCode.clear();
             st = s_st.state;
+        }
+        // A clip waits for no voucher: it is dropped while one goes by sound.
+        if (c == PLAY) {
+            if (st != KqSound::SENDING && st != KqSound::LISTENING && storageGetInt("s.audio.rate", kRate) == kRate)
+                startPlay(pcm, pcmN);
+            continue;
         }
         if (c != NONE) {
             end();
@@ -181,16 +213,22 @@ void soundMain(void*) {
         }
         uint32_t now = nowMs();
         if (s_heard && s_rx) { end(); continue; }
-        if (st == KqSound::SENDING) {
-            if (s_h < 0) { fail("the speaker went away"); continue; }
-            int due = std::min(kBlocks, kLead + (int)(now - s_t0) / 20);
+        if (s_playing || st == KqSound::SENDING) {
+            if (s_h < 0) {
+                if (s_playing) end();
+                else fail("the speaker went away");
+                continue;
+            }
+            int due = std::min(s_blocks, kLead + (int)(now - s_t0) / 20);
             for (; s_sent < due; s_sent++) {
                 avHdrFill((av_hdr_t*)s_msg, AV_TYPE_AUDIO, AUDIO_PCM16, 0, 0);
                 memcpy(s_msg + sizeof(av_hdr_t), s_clip + s_sent * kBlock, kBlock * 2);
                 itsSend(s_h, s_msg, sizeof(av_hdr_t) + kBlock * 2, pdMS_TO_TICKS(20));
             }
-            if (s_sent == kBlocks && now - s_t0 > kBlocks * 20 + 300) {
+            if (s_sent == s_blocks && now - s_t0 > (uint32_t)s_blocks * 20 + 300) {
+                bool clip = s_playing;
                 end();
+                if (clip) continue;
                 set(KqSound::IDLE);
                 info("kq sound: played a voucher, %d dBFS", std::min(storageGetInt("s.kq.sound_dbfs", -20), -9));
                 Lock g;
@@ -267,6 +305,18 @@ bool kqSoundBusy() {
 void kqSoundSend(const std::string& code) { command(SEND, code); }
 void kqSoundListen() { command(LISTEN); }
 void kqSoundStop() { command(STOP); }
+
+void kqSoundPlay(const int16_t* pcm, size_t n) {
+    if (!s_mu) return;
+    {
+        Lock g;
+        if (s_cmd != NONE) return;  // a voucher command first
+        s_cmd = PLAY;
+        s_cmdPcm = pcm;
+        s_cmdN = n;
+    }
+    if (s_task) xTaskNotifyGive(s_task);
+}
 
 void KqSoundService::onInit() {
     s_mu = xSemaphoreCreateMutex();
