@@ -48,7 +48,7 @@ enum class NoticeKind {
     NameTaken, NameTakenJoining, Minting, NewGroup, VoucherMinted, ReplyUnreadable, Joined, NotJoinedYet,
     AlreadyAdding, NotAVoucher, ReadingVoucher, Added, NotJoined, FileTooLarge, SendLost, FileTooLargeToFetch,
     Scanning, NoLongerMember, StoppedReading, Renamed, ActionFailed, TooLong, NotWritten, MemberAdded, Unreadable,
-    NotFetched, Desync,
+    NotFetched, Desync, Pinged, Unsupported,
 };
 struct Notice { NoticeKind kind; std::vector<std::string> args; };
 std::string plain(const Notice& n);

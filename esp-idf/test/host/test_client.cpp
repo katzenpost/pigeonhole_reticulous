@@ -837,21 +837,27 @@ static void file_tests(const char* out_path) {
     }
 }
 
-// A ping is content: radio listeners hear it, nobody gets a line.
+// A ping is content: its readers get a notice, radio listeners hear it, nobody gets a line.
 static void ping_tests() {
     Vec v{"client", "ping", {}};
     World w;
     found_and_join(w);
+    auto run = [&] { w.run_to(w.clock + 600000); };
     auto ping = [&](size_t i) {
         Input p(Input::PING);
         p.chat = "g";
         w.feed(i, p);
-        w.run_to(w.clock + 600000);
+        run();
     };
-    size_t a0 = w.chat(0, "g")->log.size(), b0 = w.chat(1, "g")->log.size();
+    auto lines = [&](size_t i) {
+        size_t n = 0;
+        for (auto& l : w.chat(i, "g")->log) n += !l.notice;
+        return n;
+    };
+    size_t a0 = lines(0), b0 = lines(1);
     ping(0);
-    check(w.members[1].pings.empty() && w.chat(0, "g")->log.size() == a0 && w.chat(1, "g")->log.size() == b0, v,
-          "not on the radio: no sound, and no line on either side");
+    check(w.members[1].pings.empty() && noticed(w, 1, "~alice pinged") && !noticed(w, 0, "pinged"), v,
+          "not on the radio: a notice, and no sound");
     for (auto& m : w.members) m.eng.radio.insert("g");
     ping(0);
     ping(0);
@@ -862,14 +868,35 @@ static void ping_tests() {
     x.chat = "g";
     x.text = "after the pings";
     w.feed(0, x);
-    w.run_to(w.clock + 600000);
-    check(says(w, 1, "after the pings") && w.chat(1, "g")->log.size() == b0 + 1 && w.chat(0, "g")->log.size() == a0 + 1,
-          v, "a message after them arrives, and they made no line");
+    run();
+    check(says(w, 1, "after the pings") && lines(1) == b0 + 1 && lines(0) == a0 + 1, v,
+          "a message after them arrives, and they made no line");
     ping(1);
     const Line* sent = nullptr;
     for (auto& l : w.chat(0, "g")->log) if (l.text == "after the pings") sent = &l;
     check(w.members[0].pings.size() == 1 && w.members[0].pings[0].who == "~bob", v, "and back the other way");
     check(sent && w.chat(0, "g")->acknowledged(*sent), v, "bob's ping carries his acks");
+
+    // A type this client does not know, written raw: a notice naming it, and what follows is read.
+    Chat* c = w.members[0].eng.state.chat("g");
+    Gcm g;
+    g.version = CURRENT_VERSION;
+    g.membership_hash = c->group->membership(nullptr);
+    g.msg_type = 12;
+    Bytes cbor = g.to_bytes();
+    for (auto& o : c->group->compose(cbor)) {
+        Job j;
+        j.id = c->fresh();
+        j.token = o.token;
+        j.box = frame(cbor);
+        c->jobs.push_back(j);
+    }
+    x.text = "after the unknown";
+    w.feed(0, x);
+    run();
+    check(says(w, 1, "after the unknown") &&
+              noticed(w, 1, "~alice sent a message this app cannot show (type 12, version 4): update the app"), v,
+          "an unknown type is noticed, and what follows it read");
 }
 
 int main() {

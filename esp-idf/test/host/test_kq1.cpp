@@ -112,6 +112,10 @@ int main(int, char** argv) {
                 } else {
                     check(w->to_map_bytes() == cbor, v, "map encoding");
                 }
+            } else if (sect == "unsupported") {
+                auto u = unsupported(v.hex("cbor"));
+                std::string want = v.s("version") == "null" ? "null" : v.s("version") + "," + v.s("msg_type");
+                check((u ? std::to_string(u->first) + "," + std::to_string(u->second) : "null") == want, v, "unsupported");
             } else if (sect == "malformed") {
                 auto cbor = v.hex("cbor");
                 check(!Gcm::from_bytes(cbor) && !message_from_cbor(cbor), v, "refused");

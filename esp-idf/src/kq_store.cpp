@@ -135,7 +135,7 @@ Line line_of(const Json& j) {
     l.text = str(get(j, "text"));
     if (auto& n = get(j, "notice"); !n.is_null()) {
         uint64_t k = u(get(n, "kind"));
-        if (k > (uint64_t)NoticeKind::Desync) throw Bad("unknown notice");
+        if (k > (uint64_t)NoticeKind::Unsupported) throw Bad("unknown notice");
         Notice no{(NoticeKind)k, {}};
         for (auto& a : arr(get(n, "args"))) no.args.push_back(str(a));
         l.notice = no;

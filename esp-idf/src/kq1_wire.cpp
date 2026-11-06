@@ -729,6 +729,16 @@ Bytes ping_content(const Bytes& membership_hash, uint64_t version) {
     return g.to_bytes();
 }
 
+std::optional<std::pair<uint64_t, uint64_t>> unsupported(const Bytes& cbor) {
+    Span l = span(cbor);
+    uint64_t n, version, msg_type;
+    Bytes hash;
+    if (!read_array(l, n) || n < 3 || !read_uint(l, version) || !read_bytes(l, hash) || !read_uint(l, msg_type))
+        return std::nullopt;
+    if (version > CURRENT_VERSION || msg_type > MSG_PING) return std::make_pair(version, msg_type);
+    return std::nullopt;
+}
+
 std::string text_of(const Bytes& content) {
     auto g = Gcm::from_bytes(content);
     if (!g) return "[a message that cannot be read]";

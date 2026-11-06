@@ -123,6 +123,8 @@ std::optional<Gcm> message_to_gcm(const Message& m, uint64_t version);
 std::optional<Bytes> box_of(const Message& m, uint64_t version);
 Bytes text_content(const Bytes& membership_hash, const std::string& s, uint64_t version);
 Bytes ping_content(const Bytes& membership_hash, uint64_t version);
+// (version, msg_type) of an array-form message refused for being newer or of an unknown type.
+std::optional<std::pair<uint64_t, uint64_t>> unsupported(const Bytes& cbor);
 std::string text_of(const Bytes& content);
 
 // A box's first byte: F a message, C a chunk, I a long message's chunk stream.
