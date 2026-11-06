@@ -218,6 +218,8 @@ void Engine::Flight::forget(const ChatId& chat) {
     drop_keyed(blobs);
     drop_keyed(streams);
     drop_keyed(stream_jobs);
+    unreceipted.erase(chat);
+    ticking.erase(chat);
 }
 
 // ---- one step's context, as engine/core.rs Cx ----
@@ -231,6 +233,8 @@ struct Engine::Cx {
     uint64_t version;
     size_t max_file;
     const std::set<ChatId>& radio;
+    bool pack;
+    uint64_t receipt_delay;
 
     void emit(Action a) { out.actions.push_back(std::move(a)); }
     void keep(std::string file, Bytes bytes) { out.files.push_back({std::move(file), std::move(bytes)}); }
@@ -326,8 +330,43 @@ struct Engine::Cx {
         c.jobs.push_back(j);
         dirty(c);
     }
+    // What the member sends now, content last; it acknowledges all we have read.
+    std::vector<Outgoing> compose(Chat& c, const Bytes& content) {
+        flight.unreceipted.erase(c.id);
+        return c.group->compose(content);
+    }
+    // Put text, shown as line, into the last job when that is a text message not yet being
+    // written, nothing is owed ahead of it, and both fit in a box.
+    bool pack_into(Chat& c, const std::string& text, size_t line) {
+        if (!pack || version < CURRENT_VERSION || !c.group || c.group->owes() || c.jobs.empty()) return false;
+        Job& j = c.jobs.back();
+        if (!j.token || j.index || j.upload || !j.line) return false;
+        auto ch = unframe(j.box);
+        if (ch.kind != Chunk::FINAL) return false;
+        auto packed = kq1::pack(ch.data, text);
+        if (!packed || packed->size() >= max) return false;
+        j.box = frame(*packed);
+        j.packed.push_back(line);
+        dirty(c);
+        return true;
+    }
+    // Ask for a TICK when a receipt is due.
+    void start_receipt(const Chat& c) {
+        auto u = flight.unreceipted.find(c.id);
+        if (u == flight.unreceipted.end() || !receipt_delay) return;
+        auto t = flight.ticking.find(c.id);
+        if (t != flight.ticking.end() && t->second == u->second) return;
+        flight.ticking[c.id] = u->second;
+        Action a(Action::TICK);
+        a.chat = c.id;
+        a.ms = receipt_delay;
+        a.n = u->second;
+        emit(a);
+    }
     // A line for content from sender, and the file it carries kept.
     void deliver(Chat& c, const Key& sender, const Index& index, const Bytes& content) {
+        if (c.group && c.group->me() != sender && !flight.unreceipted.count(c.id))
+            flight.unreceipted[c.id] = ++flight.receipts;
         Line l;
         l.sender = sender;
         l.index = index;
@@ -339,8 +378,10 @@ struct Engine::Cx {
         }
         auto f = g ? file_of(*g) : std::nullopt;
         if (!f) {
-            l.text = text_of(content);
-            say(c, l);
+            for (auto& t : texts_of(content)) {
+                l.text = t;
+                say(c, l);
+            }
             return;
         }
         auto it = flight.arriving.find({sender, index});
@@ -645,7 +686,7 @@ struct Engine::Cx {
         }
     }
     // A download is over: tell the member what came of it, in its place in the stream.
-    void finish(Chat& c, Download d, std::optional<Bytes> blob) {
+    void finish(Chat& c, Download d, std::optional<Bytes> blob, NoticeKind why = NoticeKind::NotFetched) {
         flight.fetched.erase({c.id, d.stream});
         c.downloads.erase(std::remove_if(c.downloads.begin(), c.downloads.end(),
                                          [&](const Download& x) { return x.stream == d.stream; }),
@@ -663,7 +704,7 @@ struct Engine::Cx {
         }
         auto m = without ? message_from_cbor(*without) : std::nullopt;
         if (m) remark(c, d.stream, frame(*without));
-        else notice(c, NoticeKind::NotFetched, {label(c, d.stream)});
+        else notice(c, why, {label(c, d.stream)});
         if (c.group) effects(c, c.group->observe(d.stream, d.index, m, d.next));
         flight.arriving.clear();
     }
@@ -715,11 +756,20 @@ struct Engine::Cx {
         parts.push_back(outcome.plaintext);
         if (tag == 'F') {
             finish(c, d, assemble(parts));
-        } else if (tag == 'C' && parts.size() < max_chunks(max, max_file) && (!d.total || parts.size() < *d.total)) {
+        } else if (fetched_bytes(parts) > max_file + max_file / 8) {
+            finish(c, d, std::nullopt, NoticeKind::FileTooLargeToFetch);
+        } else if (tag == 'C' && parts.size() < max_chunks(MIN_BOX, max_file) && (!d.total || parts.size() < *d.total)) {
             flight.fetched[k] = {outcome.next, std::move(parts)};
         } else {
             finish(c, d, std::nullopt);
         }
+    }
+    // A substream's boxes may be of any size, so what is held is bounded by its bytes: a file of
+    // max_file, with each box's tag and the message around it.
+    static size_t fetched_bytes(const std::vector<Bytes>& parts) {
+        size_t n = 0;
+        for (auto& p : parts) n += p.size();
+        return n;
     }
     void cancel_held(Chat& c) {
         if (c.group && c.group->ledger.induction == Induction::INDUCTING) c.group->cancel_induction();
@@ -750,7 +800,7 @@ struct Engine::Cx {
         dirty(c);
         auto ch = unframe(outcome.plaintext);
         if (ch.kind == Chunk::INDIRECTION) {
-            if (ch.total.value_or(0) <= max_chunks(max, max_file)) {
+            if (ch.total.value_or(0) <= max_chunks(MIN_BOX, max_file)) {
                 c.downloads.push_back({stream, index, outcome.next, ch.data,
                                        ch.total ? std::optional<size_t>(*ch.total) : std::nullopt});
                 c.cursors.insert(stream, outcome.next);
@@ -780,13 +830,14 @@ static std::optional<std::pair<Group, ReplyWho>> joined_from(const Opened& o) {
 }
 
 void Engine::pump(StepResult& out, int64_t now) {
-    Cx cx{out, flight_, now, max_plaintext, state.me, wire_version, max_file, radio};
+    Cx cx{out, flight_, now, max_plaintext, state.me, wire_version, max_file, radio, pack, receipt_delay};
     for (auto& c : state.chats) {
         cx.start_write(c);
         cx.start_reads(c);
         cx.start_induction(c);
         cx.start_uploads(c);
         cx.start_downloads(c);
+        cx.start_receipt(c);
     }
 }
 
@@ -853,7 +904,7 @@ StepResult Engine::resume(int64_t now) {
 
 void Engine::handle(StepResult& out, int64_t now, const Input& input) {
     const std::string me = state.me;
-    Cx cx{out, flight_, now, max_plaintext, me, wire_version, max_file, radio};
+    Cx cx{out, flight_, now, max_plaintext, me, wire_version, max_file, radio, pack, receipt_delay};
     switch (input.kind) {
         case Input::CREATE:
         case Input::JOIN: {
@@ -928,7 +979,7 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
     if (!cp) return;
     Chat& c = *cp;
     if (input.kind != Input::READ && input.kind != Input::READ_CHUNK && input.kind != Input::CHUNK_INDEXES &&
-        input.kind != Input::WROTE_CHUNK && input.kind != Input::STREAM_DATA)
+        input.kind != Input::WROTE_CHUNK && input.kind != Input::STREAM_DATA && input.kind != Input::TICK)
         cx.dirty(c);
     switch (input.kind) {
         case Input::CREATED: {
@@ -1015,7 +1066,10 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
         }
         case Input::JOINER_PAYLOAD: {
             if (!c.inducting || c.inducting->payload || c.inducting->voucher != input.voucher) return;
-            if (c.group) cx.enqueue(c, c.group->begin_induction(), std::nullopt, std::nullopt);
+            if (c.group) {
+                flight_.unreceipted.erase(id);
+                cx.enqueue(c, c.group->begin_induction(), std::nullopt, std::nullopt);
+            }
             Inducting i;
             i.voucher = input.voucher;
             i.payload = input.payload;
@@ -1066,14 +1120,22 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             l.text = input.text;
             l.status = Status::Pending;
             size_t line = cx.say(c, l);
-            auto outg = c.group->compose(content);
-            cx.enqueue(c, outg, content, line);
+            if (cx.pack_into(c, input.text, line)) return;
+            cx.enqueue(c, cx.compose(c, content), content, line);
             return;
         }
         case Input::PING: {
             if (!c.group) return;
             Bytes content = ping_content(c.group->membership(nullptr), wire_version);
-            cx.enqueue(c, c.group->compose(content), content, std::nullopt);
+            cx.enqueue(c, cx.compose(c, content), content, std::nullopt);
+            return;
+        }
+        case Input::TICK: {
+            auto u = flight_.unreceipted.find(id);
+            if (u == flight_.unreceipted.end() || u->second != input.n || !c.group) return;
+            flight_.unreceipted.erase(u);
+            flight_.ticking.erase(id);
+            cx.enqueue(c, c.group->acknowledge(), std::nullopt, std::nullopt);
             return;
         }
         case Input::SEND_FILE: {
@@ -1103,8 +1165,7 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
                 l.attachment = std::move(a);
                 line = cx.say(c, l);
             }
-            auto outg = c.group->compose(content);
-            cx.enqueue(c, outg, content, line, &bytes, burst);
+            cx.enqueue(c, cx.compose(c, content), content, line, &bytes, burst);
             return;
         }
 #if KQ_STREAMS
@@ -1117,7 +1178,7 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
             if (flight_.stream_jobs.count({id, safe})) return;
             FileUpload f{{}, filetype_of(safe), safe};
             Bytes content = file_content(c.group->membership(nullptr), f, wire_version);
-            for (auto& o : c.group->compose(content)) {
+            for (auto& o : cx.compose(c, content)) {
                 auto b = o.message.content == content ? box_of(o.message, wire_version) : std::nullopt;
                 if (!b) { cx.enqueue(c, {o}, std::nullopt, std::nullopt); continue; }
                 // The payload, empty when composed, is given a 5-byte length header to be filled in
@@ -1205,14 +1266,14 @@ void Engine::handle(StepResult& out, int64_t now, const Input& input) {
                 c.group->written(*j.token, input.index, Payload::raw(j.box));
                 c.next_write = input.next;
             }
-            if (j.line) {
-                for (auto& l : c.log)
-                    if (l.id == *j.line) {
-                        l.status = Status::Sent;
-                        l.idx64 = counter(input.index);
-                        cx.line_changed(c, *j.line);
-                    }
-            }
+            std::vector<size_t> lines = j.packed;
+            if (j.line) lines.insert(lines.begin(), *j.line);
+            for (auto& l : c.log)
+                if (std::find(lines.begin(), lines.end(), l.id) != lines.end()) {
+                    l.status = Status::Sent;
+                    l.idx64 = counter(input.index);
+                    cx.line_changed(c, l.id);
+                }
             return;
         }
         case Input::REFUSED: cx.notice(c, NoticeKind::Desync, {}); return;
@@ -1322,6 +1383,15 @@ Backend::Write Executor::publish(const Bytes& write_cap, const Index& index, con
     }
 }
 
+// After a miss, asks the backend to push the box, for the WAKE that follows.
+void Executor::watch(const Action& a, const Read& r) {
+    if (r.kind != Read::NOT_FOUND) return;
+    auto id = backend.watch(a.read_cap, a.index);
+    std::lock_guard<std::mutex> l(watched->mu);
+    if (id) watched->boxes[{a.chat, a.stream}] = *id;
+    else watched->boxes.erase({a.chat, a.stream});
+}
+
 Done Executor::perform(const Action& a) {
     if (auto d = perform_or(a)) return *d;
     switch (a.kind) {
@@ -1369,6 +1439,7 @@ std::optional<Done> Executor::perform_or(const Action& a) {
         case Action::SCAN_READ: {
             auto r = b.read_box(a.read_cap, a.index);
             if (!r) return std::nullopt;
+            if (a.kind == Action::READ) watch(a, *r);
             Input i(a.kind == Action::READ ? Input::READ : Input::SCAN_READ);
             i.chat = a.chat;
             i.stream = a.stream;
@@ -1419,6 +1490,7 @@ std::optional<Done> Executor::perform_or(const Action& a) {
         case Action::READ_CHUNK: {
             auto r = b.read_box(a.read_cap, a.index);
             if (!r) return std::nullopt;
+            watch(a, *r);
             Input i(Input::READ_CHUNK);
             i.chat = a.chat;
             i.stream = a.stream;
@@ -1430,6 +1502,23 @@ std::optional<Done> Executor::perform_or(const Action& a) {
             Input i(Input::WAKE);
             i.chat = a.chat;
             i.stream = a.stream;
+            Done d;
+            d.kind = Done::LATER;
+            d.input = i;
+            d.ms = a.ms;
+            std::lock_guard<std::mutex> l(watched->mu);
+            auto w = watched->boxes.find({a.chat, a.stream});
+            if (w != watched->boxes.end()) {
+                d.ms = PUSHED_POLL_MS;
+                d.until = std::move(w->second);
+                watched->boxes.erase(w);
+            }
+            return d;
+        }
+        case Action::TICK: {
+            Input i(Input::TICK);
+            i.chat = a.chat;
+            i.n = a.n;
             Done d;
             d.kind = Done::LATER;
             d.input = i;

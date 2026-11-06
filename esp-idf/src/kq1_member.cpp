@@ -947,6 +947,23 @@ std::vector<Outgoing> Group::compose(std::optional<Bytes> content) {
     return out;
 }
 
+std::vector<Outgoing> Group::acknowledge() {
+    if (!owes_control() && !owes_acks()) return {};
+    allocates = false;
+    auto [m, p] = control();
+    with_acks(m, p);
+    return {stage(m, p)};
+}
+
+// Whether a stream we read has moved on since we last acknowledged it.
+bool Group::owes_acks() const {
+    for (auto& e : rosters.known(me())) {
+        auto r = e.key ? readers.get(*e.key) : nullptr;
+        if (r && ledger.owed(r->stream, r->run())) return true;
+    }
+    return false;
+}
+
 void Group::abandoned(size_t token) {
     auto pp = pending.get(token);
     if (!pp) return;

@@ -43,8 +43,10 @@ Json chat_json(const Chat& c) {
         if (auto& u = j.upload)
             up = Json::obj({{"file", text(u->file)}, {"box_size", nu(u->box_size)}, {"total", nu(u->total)},
                             {"write_cap", h(u->write_cap)}, {"sent", nu(u->sent)}, {"next", h(u->next)}});
+        std::vector<Json> packed;
+        for (auto l : j.packed) packed.push_back(nu(l));
         jobs.push_back(Json::obj({{"id", nu(j.id)}, {"token", on(j.token)}, {"index", oh(j.index)}, {"box", h(j.box)},
-                                  {"line", on(j.line)}, {"upload", up}}));
+                                  {"line", on(j.line)}, {"upload", up}, {"packed", Json::arr(packed)}}));
     }
     for (auto& d : c.downloads)
         downloads.push_back(Json::obj({{"stream", h(d.stream)}, {"index", h(d.index)}, {"next", h(d.next)},
@@ -86,7 +88,9 @@ Chat chat_of(const Json& j) {
     each_pair(get(j, "names"), [&](const Json& k, const Json& v) { c.names.insert(b(k), str(v)); });
     for (auto& x : arr(get(j, "jobs"))) {
         Job jb{(size_t)u(get(x, "id")), ous(get(x, "token")), ob(get(x, "index")), b(get(x, "box")), ous(get(x, "line")),
-               std::nullopt};
+               std::nullopt, {}};
+        if (auto p = opt(x, "packed"))
+            for (auto& l : arr(*p)) jb.packed.push_back((size_t)u(l));
         if (auto up = opt(x, "upload"))
             jb.upload = Upload{str(get(*up, "file")), (size_t)u(get(*up, "box_size")), (size_t)u(get(*up, "total")),
                                b(get(*up, "write_cap")), (size_t)u(get(*up, "sent")), b(get(*up, "next"))};

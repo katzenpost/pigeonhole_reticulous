@@ -16,11 +16,25 @@ enum Code : uint8_t {
     STORAGE_FULL, INTERNAL_ERROR, INVALID_EPOCH, REPLICATION_FAILED, ALREADY_EXISTS, TOMBSTONE,
 };
 
+// Box plaintext sizes, as pigeonhole_protocols transport: mesh, written on Reticulum (a write in one
+// Link packet), and the mixnet's. A reader takes any allowed size: these and configured ones, each
+// within kMinBox (a substream's I box) and kMaxBox. Only the payload differs between sizes.
+constexpr size_t kBoxMesh = 256, kBoxMixnet = 1549, kMinBox = 141, kMaxBox = 16384;
+// kBoxMesh, kBoxMixnet and extra, smallest first; extra sizes out of bounds are left out.
+std::vector<size_t> allowed_sizes(const std::vector<size_t>& extra);
+// The size n bytes are written at: writer, or when n outgrows it the smallest allowed size that
+// holds it, as a voucher's first box, which is never split; 0 when none does.
+size_t fit_size(const std::vector<size_t>& allowed, size_t writer, size_t n);
+
 // A four byte big endian length, the data, zeros to box_size + 4. nullopt when data exceeds box_size.
 std::optional<Bytes> pad(const uint8_t* data, size_t len, size_t box_size);
 std::optional<Bytes> unpad(const uint8_t* padded, size_t len);
 
 Bytes read_query(const uint8_t box_id[32]);
+// pigeonhole_rns push, mode 2 op 6: ttl 0 asks for the longest a replica keeps a subscription.
+constexpr uint8_t kSubscribe = 6;
+constexpr uint8_t kPushFlag = 16;  // announce flag bit 4: the replica serves push
+Bytes subscribe_query(const uint8_t box_id[32], uint16_t ttl = 0);
 Bytes write_query(const uint8_t box_id[32], const uint8_t sig[64], const uint8_t* ct, size_t ct_len);
 
 struct Reply {
@@ -34,6 +48,8 @@ std::optional<Reply> decode_reply(const uint8_t* p, size_t len);
 // ---- Channel mode ----
 
 constexpr uint16_t kMsgType = 0x5048;
+// A push, framed as a query's under the replica's own request ids: box id 32 | reply.
+constexpr uint16_t kPushMsgType = 0x5049;
 constexpr size_t kFrameHeader = 4, kMaxPieces = 255;
 constexpr uint32_t kReassemblyTimeoutMs = 60000;
 

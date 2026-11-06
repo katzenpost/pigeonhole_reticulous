@@ -3,6 +3,7 @@
 // status bar, with the board's keypad and pointer fed from commands on standard input:
 //   type <text> | key enter|esc|tab|backtab|up|down|left|right|bs | click <x> <y> | back
 //   shot <file.png> | sleep <s> | until <text> <s> | dump | talk | release | hear <file.wav> | quit
+//   | kq <verb> <group> [<arg>] (a command as the screens send it)
 // The chats are saved in --state, which must exist, and loaded from it at start.
 // `until` waits until the chats (as `dump` prints them) contain the text.
 #include <chrono>
@@ -263,6 +264,10 @@ int main(int argc, char** argv) {
             simListen(arg);
         } else if (cmd == "talk" || cmd == "release") {
             simTalk(cmd == "talk");
+        } else if (cmd == "kq") {
+            size_t a = arg.find(' '), b = a == std::string::npos ? a : arg.find(' ', a + 1);
+            std::string group = arg.substr(a == std::string::npos ? arg.size() : a + 1, b == std::string::npos ? b : b - a - 1);
+            kqCommand(arg.substr(0, a).c_str(), group, b == std::string::npos ? "" : arg.substr(b + 1));
         } else if (cmd == "dump") {
             printf("channel %s; saved %s\n%s", simChannelUp() ? "up" : "down", simSaved().c_str(), dump().c_str());
         } else if (cmd == "quit") {

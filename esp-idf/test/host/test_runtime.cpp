@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Two clients through one in-memory replica, with real crypto: bob mints a voucher, alice adds
-// him, they talk. Everything a device runs but the tasks that carry it.
+// him, they talk, at the mesh's box size. Everything a device runs but the tasks that carry it;
+// then the replica serves push.
 #include <sodium.h>
 
 #include "fake_replica.h"
@@ -15,8 +16,9 @@ struct Peer {
     ReplicaClient client;
     ReplicaBackend backend;
     Runtime rt;
+    std::shared_ptr<Watched> watched = std::make_shared<Watched>();
     Peer(const std::string& n, FakeReplica& r)
-        : name(n), rep(r), client(1549, [this](const Bytes& f) { rep.on_frame(f); return true; }),
+        : name(n), rep(r), client(kq::wire::kBoxMesh, [this](const Bytes& f) { rep.on_frame(f); return true; }),
           backend(client, [this](auto fn) {
               bool fin = false;
               fn([&] { fin = true; });
@@ -26,14 +28,14 @@ struct Peer {
                   for (auto& f : out) client.on_message(f.data(), f.size(), 0);
               }
           }),
-          rt(State{n, {}}, 1549) {
+          rt(State{n, {}}, kq::wire::kBoxMesh) {
         client.ready(0);
     }
     void in(Input x, uint64_t t) { rt.input((int64_t)(t / 1000), t, x); }
     // Runs every ready action; true when one ran.
     bool act(uint64_t t) {
         bool any = false;
-        Executor x{backend, [](uint64_t) {}};
+        Executor x{backend, [](uint64_t) {}, {}, watched};
         while (auto a = rt.take()) {
             rt.finished((int64_t)(t / 1000), t, x.perform(*a));
             any = true;
@@ -51,10 +53,21 @@ static Input make(Input::Kind k, const std::string& text = "") {
     return x;
 }
 
+// The replica's pushes go to every client; each takes those it waits for.
+static void pushes(std::vector<Peer*> ms) {
+    auto out = std::move(ms[0]->rep.pushbox);
+    ms[0]->rep.pushbox.clear();
+    for (auto* m : ms) {
+        for (auto& f : out) m->client.on_push(f.data(), f.size(), 0);
+        for (auto& id : m->client.take_woken()) m->rt.pushed(id);
+    }
+}
+
 static void run(std::vector<Peer*> ms, uint64_t& t, uint64_t until) {
     for (;;) {
         bool any = false;
         for (auto* m : ms) any |= m->act(t);
+        pushes(ms);
         if (any) continue;
         std::optional<uint64_t> due;
         for (auto* m : ms)
@@ -127,6 +140,27 @@ int main(int, char**) {
     alice.in(ind3, t);
     run(three, t, t + 600000);
     check(carol.chat() && carol.chat()->group.has_value(), v, "carol joined");
+
+    // Ten quiet minutes polling, then ten with push; and a message read as soon as it is written.
+    size_t r0 = rep.reads;
+    run(three, t, t + 600000);
+    size_t polled = rep.reads - r0;
+    rep.push = true;
+    for (auto* m : three) m->client.set_push(true);
+    run(three, t, t + 60000);
+    r0 = rep.reads;
+    run(three, t, t + 600000);
+    size_t pushed = rep.reads - r0;
+    printf("read queries in ten quiet minutes: %zu polling, %zu with push\n", polled, pushed);
+    check(pushed * 3 < polled, v, "with push, a third of the read queries or fewer");
+    alice.in(make(Input::SEND, "pushed to bob"), t);
+    run(three, t, t + 100);
+    check(says(bob, "pushed to bob") && says(carol, "pushed to bob"), v, "with push, read at once");
+    rep.push = false;
+    for (auto* m : three) m->client.reset(), m->client.ready(0);
+    alice.in(make(Input::SEND, "after the push stopped"), t);
+    run(three, t, t + 600000);
+    check(says(bob, "after the push stopped"), v, "a replica that stops pushing is polled again");
 
     for (auto* m : both) {
         printf("%s:\n", m->name.c_str());

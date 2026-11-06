@@ -42,8 +42,10 @@ std::optional<kq1::Action> Runtime::take_if(const std::function<bool(const kq1::
 void Runtime::finished(int64_t now_s, uint64_t now_ms, const kq1::Done& d) {
     switch (d.kind) {
         case kq1::Done::DONE: if (d.input) input(now_s, now_ms, *d.input); break;
-        case kq1::Done::RETRY: later_.push_back({now_ms + d.ms, d.action, std::nullopt}); break;
-        case kq1::Done::LATER: later_.push_back({now_ms + d.ms, std::nullopt, d.input}); break;
+        case kq1::Done::RETRY: later_.push_back({now_ms + d.ms, d.action, std::nullopt, {}}); break;
+        case kq1::Done::LATER:
+            later_.push_back({!d.until.empty() && early_.erase(d.until) ? now_ms : now_ms + d.ms, std::nullopt, d.input, d.until});
+            break;
         case kq1::Done::NOTHING: break;
     }
 }
@@ -56,6 +58,14 @@ void Runtime::tick(int64_t now_s, uint64_t now_ms) {
         if (l.act) { if (eng.state.wanted(*l.act)) ready_.push_back(*l.act); }
         else input(now_s, now_ms, *l.in);
     }
+}
+
+void Runtime::pushed(const Bytes& box_id) {
+    bool waited = false;
+    for (auto& l : later_)
+        if (!l.until.empty() && l.until == box_id) { l.due = 0; waited = true; }
+    // shortcut: early pushes are held at most 64 at once; one past that waits for its slow poll.
+    if (!waited && early_.size() < 64) early_.insert(box_id);
 }
 
 std::optional<uint64_t> Runtime::next_due() const {
@@ -105,6 +115,17 @@ std::optional<kq1::Read> ReplicaBackend::read_box(const Bytes& read_cap, const k
         case ReadOutcome::TOMBSTONE: out.kind = kq1::Read::TOMBSTONE; return out;
         default: error_ = "no answer from the replica"; return std::nullopt;
     }
+}
+
+std::optional<Bytes> ReplicaBackend::watch(const Bytes& read_cap, const kq1::Index& index) {
+    auto r = bacap::ReadCap::from(read_cap.data(), read_cap.size());
+    auto i = bacap::Index::from(index.data(), index.size());
+    if (!r || !i) return std::nullopt;
+    std::optional<Bytes> id;
+    bridge_([&](std::function<void()> done) {
+        client_.subscribe(r->root_pk, *i, [&id, done](std::optional<Bytes> x) { id = std::move(x); done(); });
+    });
+    return id;
 }
 
 std::optional<kq1::Minted> ReplicaBackend::voucher_mint(const Bytes& write_cap, const std::string& name, uint8_t form) {

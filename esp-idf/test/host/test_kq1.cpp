@@ -88,12 +88,12 @@ int main(int, char** argv) {
                     continue;
                 }
                 auto rw = v.hex("rewritten");
-                auto back = v4 ? message_to_gcm(*got, CURRENT_VERSION).value().to_bytes() : *map_gcm(*got);
+                auto back = v4 ? message_to_gcm(*got, ARRAY_VERSION).value().to_bytes() : *map_gcm(*got);
                 check(back == rw, v, "written back");
                 if (rw == cbor) check(Gcm::from_bytes(cbor)->to_bytes() == cbor, v, "encodes to itself");
             } else if (sect == "written") {
                 auto m = read_message(Json::parse(v.s("message")));
-                auto b = v4 ? box_of(m, CURRENT_VERSION) : std::optional<Bytes>(frame(*map_gcm(m)));
+                auto b = v4 ? box_of(m, ARRAY_VERSION) : std::optional<Bytes>(frame(*map_gcm(m)));
                 check(b && *b == v.hex("box"), v, "box");
             } else if (sect == "membership") {
                 std::vector<Bytes> caps;
@@ -122,6 +122,47 @@ int main(int, char** argv) {
             }
         }
     }
+    // Version 5: several texts packed in one box, and what a reader of it refuses.
+    for (auto& v : load(path, "katzenqt1/groupchat_wire_vectors_v5.json")) {
+        const std::string& sect = v.s("section");
+        auto cbor = v.hex("cbor");
+        if (sect == "packed") {
+            std::optional<Bytes> b = v.hex("start");
+            for (auto& t : Json::parse(v.s("added")).a) b = b ? pack(*b, t.s) : std::nullopt;
+            check(b == cbor, v, "packed alike");
+            std::vector<std::string> texts;
+            for (auto& t : Json::parse(v.s("texts")).a) texts.push_back(t.s);
+            auto g = Gcm::from_bytes(cbor);
+            check(g && g->msg_type == MSG_PACKED && g->texts == texts && texts_of(cbor) == texts && g->to_bytes() == cbor, v,
+                  "read, and written back");
+            check(message_json(message_from_cbor(cbor)) == Json::parse(v.s("message")), v, "read as a message");
+        } else if (sect == "unsupported") {
+            auto u = unsupported(cbor);
+            check(!message_from_cbor(cbor) && u && u->first == v.u("version") && u->second == v.u("msg_type"), v,
+                  "unsupported");
+        } else if (sect == "malformed") {
+            check(!Gcm::from_bytes(cbor) && !message_from_cbor(cbor), v, "refused");
+        }
+    }
+
+    // Substreams cut to each box size, as pigeonhole_protocols testdata/box_sizes.json.
+    for (auto& v : load(path, "pigeonhole/box_sizes.json")) {
+        if (v.has("section") && v.s("section") == "substreams") {
+            size_t max = v.s("size") == "mesh" ? 256 : 1549;
+            auto message = v.hex("message");
+            std::vector<Bytes> boxes;
+            for (auto& b : Json::parse(v.s("boxes")).a) boxes.push_back(unhex(b.s));
+            bool same;
+            if (message.size() + 1 <= max) {
+                same = boxes.size() == 1 && boxes[0] == frame(message);  // it fits one box
+            } else {
+                same = chunk_count(message.size(), max) == boxes.size() && assemble(boxes) == message;
+                for (size_t i = 0; i < boxes.size(); i++) same &= substream_box(message, max, i) == boxes[i];
+            }
+            check(same, v, "cut alike, and assembled");
+        }
+    }
+
     for (auto& v : load(path, "katzenqt1/acks_vectors.json")) {
         const std::string& sect = v.s("section");
         auto field = v.hex("field");
@@ -166,8 +207,12 @@ int main(int, char** argv) {
 
     Vec v{"kq1", "unit", {}};
     Bytes H(HASH_SIZE, 0);
-    auto text = text_content(H, "hello", CURRENT_VERSION);
+    auto text = text_content(H, "hello", ARRAY_VERSION);
     check(text[0] >> 5 == 4 && text_of(text) == "hello", v, "v4 text");
+    auto two = pack(text_content(H, "one", CURRENT_VERSION), "two");
+    check(two && text_of(*two) == "one\ntwo" && Gcm::from_bytes(*two)->version == PACKED_VERSION, v,
+          "a packed message's text");
+    check(!pack(ping_content(H, CURRENT_VERSION), "x"), v, "a ping does not pack");
     Gcm m3;
     m3.version = MAP_VERSION;
     m3.membership_hash = H;
@@ -175,6 +220,7 @@ int main(int, char** argv) {
     m3.text = "hello";
     auto b3 = m3.to_bytes();
     check(b3[0] >> 5 == 5 && text_of(b3) == "hello" && Gcm::from_bytes(b3)->to_bytes() == b3, v, "v3 text");
+    check(!pack(b3, "x"), v, "the map form does not pack");
     check(text_content(H, "", CURRENT_VERSION).size() == 38, v, "empty text costs 38");
     check(text_content(H, std::string(24, 'a'), CURRENT_VERSION).size() == 39 + 24, v, "text header grows");
     Gcm intro;
@@ -201,7 +247,7 @@ int main(int, char** argv) {
 
     // A ping, as the vectors' "ping": msg_type 11, a null body.
     Bytes pc = unhex("840458204592987f08d443913f3f0d0cc916a79db26d468c256676536cb19ce851a593c90bf6");
-    check(ping_content(Bytes(pc.begin() + 4, pc.begin() + 36), CURRENT_VERSION) == pc &&
+    check(ping_content(Bytes(pc.begin() + 4, pc.begin() + 36), ARRAY_VERSION) == pc &&
               Gcm::from_bytes(pc)->msg_type == MSG_PING, v, "a ping");
     return finish("kq1");
 }

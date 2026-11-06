@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // The kq task: finds the nearest Pigeonhole replica that serves Channel mode, keeps one
-// Channel to it, carries the replica client's frames over it, and runs the katzenqt1 client:
+// Channel to it, carries the replica client's frames and the replica's pushes over it, and runs
+// the katzenqt1 client:
 // the engine on this task, the executor on two workers whose box reads and writes come back
 // here, since the Channel's ITS handle belongs to this task.
 #include "kq_service.h"
@@ -74,7 +75,7 @@ static void wake() { if (s_task) xTaskNotifyGive(s_task); }
 struct Replica {
     uint8_t identity[16];
     uint8_t hops;
-    uint8_t flags;  // bit 0 a bridge, bit 1 serves Channel mode
+    uint8_t flags;  // bit 0 a bridge, bit 1 serves Channel mode, bit 4 push
 };
 static std::map<std::string, Replica> s_replicas;  // dest hex -> what its announces said
 static int s_annHandle = -1;
@@ -134,7 +135,9 @@ static void onChanRecv(int handle, size_t) {
     for (;;) {
         size_t n = itsRecv(handle, buf, sizeof buf, 0);
         if (n == 0) return;
-        if (n < 2 || ((uint16_t)(buf[0] << 8 | buf[1])) != kq::wire::kMsgType) continue;
+        uint16_t type = n < 2 ? 0 : (uint16_t)(buf[0] << 8 | buf[1]);
+        if (type == kq::wire::kPushMsgType) s_client->on_push(buf + 2, n - 2, nowMs());
+        if (type != kq::wire::kMsgType) continue;
         s_recv++;
         s_client->on_message(buf + 2, n - 2, nowMs());
     }
@@ -172,6 +175,7 @@ static void openChannel() {
     uint8_t h[16];
     for (int i = 0; i < 16; i++) h[i] = (uint8_t)strtoul(dest->substr(2 * i, 2).c_str(), nullptr, 16);
     s_chanDest = *dest;
+    s_client->set_push(s_replicas[*dest].flags & kq::wire::kPushFlag);
     s_chan = rnsdChannelOpen(h, kAspect, "", kChanTag, 0, 20000, 0, onChanRecv, onChanDisc);
     if (s_chan < 0) s_chanClosedAt = nowMs();
     else info("kq: opening channel to replica %s", dest->c_str());
@@ -195,6 +199,7 @@ struct Worker {
     QueueHandle_t q = nullptr;
     bool idle = true;
 };
+static std::shared_ptr<kq1::Watched> s_watched = std::make_shared<kq1::Watched>();  // the workers' executors share it
 static Worker s_workers[] = {{WORK_HEAVY, "kq.ctidh"}, {WORK_READ, "kq.read"}, {WORK_READ, "kq.read"},
                              {WORK_WRITE, "kq.write"}, {WORK_WRITE, "kq.write"}};
 static constexpr size_t kWorkers = sizeof s_workers / sizeof s_workers[0];
@@ -246,7 +251,8 @@ static void workerMain(void* arg) {
                          auto d = s_vault->files().read(f);
                          return d ? std::optional<kq::Bytes>(kq::Bytes(d->begin(), d->end())) : std::nullopt;
                      },
-                     [](const std::string& f) { s_vault->files().remove(f); }}};
+                     [](const std::string& f) { s_vault->files().remove(f); }},
+                    s_watched};
     for (;;) {
         kq1::Action* a = nullptr;
         if (xQueueReceive(q, &a, portMAX_DELAY) != pdTRUE || !a) continue;
@@ -269,6 +275,7 @@ static void pumpClient() {
         delete r;
     }
     xSemaphoreTake(s_mu, portMAX_DELAY);
+    for (auto& id : s_client->take_woken()) s_rt->pushed(id);
     Finished* f;
     while (xQueueReceive(s_doneQ, &f, 0) == pdTRUE) {
         s_rt->finished(nowS(), nowMs(), f->done);
@@ -391,10 +398,11 @@ static void onCmd(const char* key, const char* val) {
     xSemaphoreGive(s_mu);
 }
 
-// s.kq.wire_version: the katzenqt1 wire version written and minted, 4 (compact vouchers) or 3
-// (long ones), for founders that read only those: kpclientd on hpqc v0.0.95.
+// s.kq.wire_version: the katzenqt1 wire version written and minted: 3 (long vouchers), for
+// founders that read only those (kpclientd on hpqc v0.0.95), else the current one, 5, which packs
+// texts sent in a row into one box; 4, the default before 5, writes 5 too.
 static void onWireVersion(const char*, const char*) {
-    uint64_t v = storageGetInt("s.kq.wire_version", 4) == 3 ? kq1::MAP_VERSION : kq1::CURRENT_VERSION;
+    uint64_t v = storageGetInt("s.kq.wire_version", 5) == 3 ? kq1::MAP_VERSION : kq1::CURRENT_VERSION;
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_rt->eng.wire_version = v;
     xSemaphoreGive(s_mu);
@@ -852,8 +860,12 @@ static void cliKq(const char* args) {
     for (auto& [d, r] : s_replicas) cliPrintf("  %s hops %d flags %d\n", d.c_str(), r.hops, r.flags);
     cliPrintf("channel: %s %s\n", s_chanDest.empty() ? "-" : s_chanDest.c_str(),
               s_chan < 0 ? "closed" : s_chanUp ? "up" : "opening");
-    cliPrintf("requests pending: %u, box size %u, wire version %u\n", (unsigned)s_client->pending(),
-              (unsigned)s_client->box_size(), (unsigned)s_rt->eng.wire_version);
+    std::string sizes;
+    for (size_t n : s_client->sizes()) sizes += (sizes.empty() ? "" : ", ") + std::to_string(n);
+    cliPrintf("requests pending: %u, boxes written at %u bytes, read at %s, wire version %u\n",
+              (unsigned)s_client->pending(), (unsigned)s_client->box_size(), sizes.c_str(),
+              (unsigned)s_rt->eng.wire_version);
+    cliPrintf("push: %s, %u boxes pushed\n", s_client->push() ? "served" : "not served, polling", s_client->pushes);
     cliPrintf("frames sent %u, refused %u, received %u\n", s_sent, s_sendFail, s_recv);
 #if KQ_STREAM_CLI
     cliPrintf("stream: %s\n", s_feed.status.c_str());
@@ -924,14 +936,16 @@ void KqService::onInit() {
     storageBegin();
     storageDefault("s.kq.box_size", 1549);
     storageDefault("s.kq.name", "kq");
-    storageDefault("s.kq.wire_version", 4);
+    storageDefault("s.kq.wire_version", 5);
     storageDefault("s.kq.cores", 2);
     storageEnd();
     // s.kq.cores 1 runs a seal's two CTIDH actions in turn on the worker's core, to compare with 2.
     kq::nike::both = [](const kq::nike::Fn& a, const kq::nike::Fn& b) {
         (storageGetInt("s.kq.cores", 2) == 1 ? kq::nike::in_turn : kq::nike::at_once)(a, b);
     };
-    s_client = new kq::ReplicaClient((size_t)storageGetInt("s.kq.box_size", 1549), sendFrame);
+    // Boxes are written at the mesh size, one Link packet each; s.kq.box_size, the size the mesh's
+    // replicas took before, is read too, as are the mesh's and the mixnet's.
+    s_client = new kq::ReplicaClient(kq::wire::kBoxMesh, sendFrame, {(size_t)storageGetInt("s.kq.box_size", 1549)});
     s_probe = new kq::Probe(*s_client, nowMs, [](uint8_t* p, size_t n) { randombytes_buf(p, n); });
     s_mu = xSemaphoreCreateMutex();
     for (auto& w : s_workers) w.q = xQueueCreate(1, sizeof(kq1::Action*));
