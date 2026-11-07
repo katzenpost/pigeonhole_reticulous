@@ -19,7 +19,7 @@ VOICE := $(ROOT)/conditional/lxst
 SIM_FLAGS := $(CXXFLAGS) $(LV_FLAGS) -Ishim -I../host -I$(APP)/include -I$(VOICE)/include -I$(SPANGAP_LCD)/esp-idf/include -Wno-missing-field-initializers -Wno-deprecated-declarations
 SIM_O := $(B)/sim.o $(B)/sim_client.o $(B)/kq_lcd.o $(B)/kq_radio_app.o $(B)/lcd_input_box.o
 
-$(B)/kq-sim: $(SIM_O) $(QR_O) $(FSKV_O) $(B)/fskv_room.o $(KQ_O) $(VOICE_O) $(SODIUM_O) $(CTIDH_O) $(LVGL_O)
+$(B)/kq-sim: $(SIM_O) $(QR_O) $(GG_O) $(B)/room.o $(KQ_O) $(VOICE_O) $(SODIUM_O) $(CTIDH_O) $(LVGL_O)
 	$(CXX) $^ -o $@ $(LDLIBS) $(shell pkg-config --libs freetype2) -lpthread
 
 $(B)/fake-relay: fake_relay.cpp ../host/fake_replica.h $(KQ_O) $(SODIUM_O) $(CTIDH_O)
@@ -41,7 +41,7 @@ $(B)/kq_radio_app.o: $(VOICE)/src/kq_radio_app.cpp $(VOICE)/include/kq_radio_app
 	@mkdir -p $(B)
 	$(CXX) $(SIM_FLAGS) -c $< -o $@
 
-$(B)/fskv_room.o: ../host/fskv_room.c ../host/fskv_room.h
+$(B)/room.o: ../host/room.c ../host/room.h
 	@mkdir -p $(B)
 	$(CC) -O2 -g -std=c11 -Wall -Wextra -D_DEFAULT_SOURCE -c $< -o $@
 

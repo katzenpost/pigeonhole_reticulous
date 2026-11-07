@@ -55,7 +55,8 @@ enum class KqStream { START, DATA, END };
 void kqStream(const std::string& group, const std::string& name, KqStream step, const std::vector<uint8_t>& bytes = {});
 
 // A voucher code sent or heard by sound, where the board has a speaker and a microphone
-// (spangap/audio): one 1.2 s MFSK frame, played quietly for a device 10-30 cm away. Listening
+// (spangap/audio): one 2.7 s ggwave message (docs/sound-vouchers.md), played quietly for a device
+// 10-30 cm away. Listening
 // stops after kListenMs. Both screens show the code's check digits (kq1::voucher_check).
 struct KqSound {
     enum State { IDLE, SENDING, LISTENING, HEARD, FAILED } state = IDLE;

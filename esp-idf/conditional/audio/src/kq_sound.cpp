@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <new>
 
 #include <sodium.h>
 
@@ -19,15 +20,14 @@
 #include "freertos/task.h"
 #include "spangap.h"
 
-#include "fskv.h"
 #include "kq1_engine.h"
+#include "kq_ggwave.h"
 #include "kq_view.h"
 
 namespace {
 
 constexpr int kRate = 16000, kBlock = 320;  // the audio engine's 20 ms block at 16 kHz
 constexpr int kQuiet = 10;                  // blocks of silence first, while the speaker comes up
-constexpr int kBlocks = kQuiet + FSKV_SAMPLES / kBlock + 5;
 constexpr int kLead = 4;                    // blocks sent ahead of playout: the engine banks 120 ms
 constexpr size_t kMsg = sizeof(av_hdr_t) + 1920 * 2;
 
@@ -50,8 +50,7 @@ int16_t* s_clip = nullptr;
 int s_sent = 0, s_blocks = 0;  // of s_clip
 uint32_t s_t0 = 0;
 bool s_playing = false;        // a short clip (PLAY), not a voucher: s_st is left alone
-fskv_rx* s_rx = nullptr;
-int16_t* s_rxBuf = nullptr;
+kqgg::Rx* s_rx = nullptr;
 int s_peak = 0;
 bool s_heard = false;
 
@@ -70,9 +69,8 @@ void end() {
     s_playing = false;
     if (s_rx) pmBoostEnd();
     heap_caps_free(s_clip);
-    heap_caps_free(s_rx);
-    heap_caps_free(s_rxBuf);
-    s_clip = s_rxBuf = nullptr;
+    delete s_rx;
+    s_clip = nullptr;
     s_rx = nullptr;
 }
 
@@ -86,18 +84,17 @@ void onRecv(int h, size_t) {
         const int16_t* pcm = (const int16_t*)(s_msg + sizeof(av_hdr_t));
         size_t ns = (n - sizeof(av_hdr_t)) / 2;
         for (size_t i = 0; i < ns; i++) s_peak = std::max(s_peak, std::abs((int)pcm[i]));
-        uint8_t v[FSKV_PAYLOAD];
+        uint8_t v[kqgg::kPayload];
         int64_t t = esp_timer_get_time();
-        if (!fskv_rx_push(s_rx, pcm, ns, v)) continue;
+        if (s_rx->push(pcm, ns, v, sizeof v) != kqgg::kPayload) continue;
         s_heard = true;
         std::string code = kq1::voucher_code(kq1::Bytes(v, v + sizeof v));
         char line[200];
         snprintf(line, sizeof line,
-                 "heard a voucher, check %s, %.1f s into listening: RS fixed %d, clock %.4f, %d tries, decoded in %d ms, "
+                 "heard a voucher, check %s, %.1f s into listening: decoded in %d ms, %d heard before it undecoded, "
                  "mic peak %.0f dBFS",
-                 kq1::voucher_check(code).c_str(), (nowMs() - (s_until - KqSound::kListenMs)) / 1000.0, s_rx->st.rs_fixed,
-                 s_rx->st.a, s_rx->st.tries, (int)((esp_timer_get_time() - t) / 1000),
-                 20 * log10(std::max(s_peak, 1) / 32768.0));
+                 kq1::voucher_check(code).c_str(), (nowMs() - (s_until - KqSound::kListenMs)) / 1000.0,
+                 (int)((esp_timer_get_time() - t) / 1000), s_rx->failed, 20 * log10(std::max(s_peak, 1) / 32768.0));
         info("kq sound: %s", line);
         sodium_memzero(v, sizeof v);
         set(KqSound::HEARD, code);
@@ -119,19 +116,22 @@ void fail(const std::string& why) {
     s_last = why;
 }
 
+int volume() { return std::clamp(storageGetInt("s.kq.sound_volume", kqgg::kVolume), 1, 100); }
+
 void startSend(const std::string& code) {
     auto v = kq1::from_code(code);
-    s_clip = (int16_t*)heap_caps_calloc(kBlocks * kBlock, 2, MALLOC_CAP_SPIRAM);
-    if (!v || !s_clip) { fail(!v ? "that is not a voucher code" : "no memory for the sound"); return; }
-    // The level: s.kq.sound_dbfs, RMS, -20 unless set; quiet, for a device 10-30 cm away.
-    int dbfs = std::min(storageGetInt("s.kq.sound_dbfs", -20), -9);
-    fskv_modulate(v->data(), (float)(32768 * pow(10, dbfs / 20.0) * 2 * M_SQRT2), s_clip + kQuiet * kBlock);
+    if (!v) { fail("that is not a voucher code"); return; }
+    set(KqSound::SENDING);  // the encoding takes a moment
+    // The level: s.kq.sound_volume, ggwave's 0-100, 25 unless set: -25 dBFS RMS, for a device 10-30 cm away.
+    auto pcm = kqgg::encode(v->data(), v->size(), volume());
     sodium_memzero(v->data(), v->size());
+    s_blocks = kQuiet + (int)((pcm.size() + kBlock - 1) / kBlock) + 5;
+    s_clip = pcm.empty() ? nullptr : (int16_t*)heap_caps_calloc(s_blocks * kBlock, 2, MALLOC_CAP_SPIRAM);
+    if (!s_clip) { fail("no memory for the sound"); return; }
+    memcpy(s_clip + kQuiet * kBlock, pcm.data(), pcm.size() * 2);
     if (!connect("pcm16,playback")) { fail("the speaker is in use"); return; }
     s_sent = 0;
-    s_blocks = kBlocks;
     s_t0 = nowMs();
-    set(KqSound::SENDING);
 }
 
 // After the same quiet lead a voucher has, while the speaker comes up.
@@ -152,16 +152,14 @@ void startPlay(const int16_t* pcm, size_t n) {
 }
 
 void startListen() {
-    s_rx = (fskv_rx*)heap_caps_malloc(sizeof *s_rx, MALLOC_CAP_SPIRAM);
-    s_rxBuf = (int16_t*)heap_caps_malloc(FSKV_RX_MIN * 2, MALLOC_CAP_SPIRAM);
-    if (!s_rx || !s_rxBuf) {
-        heap_caps_free(s_rx);
+    s_rx = new (std::nothrow) kqgg::Rx;
+    if (!s_rx || !s_rx->ok()) {
+        delete s_rx;
         s_rx = nullptr;
         fail("no memory to listen");
         return;
     }
-    pmBoost();  // an FFT every 4 ms of sound, and the decode
-    fskv_rx_init(s_rx, s_rxBuf, FSKV_RX_MIN);
+    pmBoost();  // the resampling and an FFT every 21 ms of sound, and the decode
     s_peak = 0;
     s_heard = false;
     if (!connect("pcm16")) { fail("the microphone is not there"); return; }
@@ -230,7 +228,7 @@ void soundMain(void*) {
                 end();
                 if (clip) continue;
                 set(KqSound::IDLE);
-                info("kq sound: played a voucher, %d dBFS", std::min(storageGetInt("s.kq.sound_dbfs", -20), -9));
+                info("kq sound: played a voucher, volume %d", volume());
                 Lock g;
                 s_last = "played a voucher";
             }
@@ -273,7 +271,7 @@ void cliSound(const char* args) {
     if (verb == "listen") { kqSoundListen(); cliPrintf("kqsound: listening for %u s\n", (unsigned)(KqSound::kListenMs / 1000)); return; }
     if (verb == "stop") { kqSoundStop(); return; }
     if (!a.empty()) {
-        cliPrintf("kqsound [send <g> | listen | stop]: a voucher by sound; s.kq.sound_dbfs sets the level (-20)\n");
+        cliPrintf("kqsound [send <g> | listen | stop]: a voucher by sound; s.kq.sound_volume sets the level (25)\n");
         return;
     }
     KqSound s = kqSound();

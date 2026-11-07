@@ -16,4 +16,5 @@ which builds the app's screens on the desktop with the device's LVGL, fonts and 
 runs the real chat client behind them.
 
 Licensed under the GNU Affero General Public License, version 3 only (AGPL-3.0-only).
-`esp-idf/components/kq_qrcode` holds Nayuki's QR Code generator, under the MIT License.
+`esp-idf/components/kq_qrcode` holds Nayuki's QR Code generator, and `esp-idf/components/kq_ggwave`
+holds ggwave ([docs/sound-vouchers.md](docs/sound-vouchers.md)), both under the MIT License.
