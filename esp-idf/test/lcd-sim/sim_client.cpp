@@ -26,8 +26,8 @@
 #include "kq_ping_sounds.h"
 #include "kq_radio_feed.h"
 #include "kq_view.h"
-#include "fskv.h"
-#include "fskv_room.h"
+#include "kq_ggwave.h"
+#include "room.h"
 #include "kq1_engine.h"
 #include "sim.h"
 
@@ -350,8 +350,9 @@ bool kqSoundBusy() {
 void kqSoundSend(const std::string& code) {
     auto v = kq1::from_code(code);
     if (!v) return;
-    std::vector<int16_t> pcm(16000 / 5 + FSKV_SAMPLES + 16000 / 10);
-    fskv_modulate(v->data(), 9268, pcm.data() + 16000 / 5);  // -20 dBFS, as the device plays it
+    auto clip = kqgg::encode(v->data(), v->size());  // as the device plays it, after 0.2 s of quiet
+    std::vector<int16_t> pcm(16000 / 5 + clip.size() + 16000 / 10);
+    std::copy(clip.begin(), clip.end(), pcm.begin() + 16000 / 5);
     std::string path = g_stateDir + "/sound.wav";
     wav_write(path.c_str(), pcm.data(), pcm.size());
     fprintf(stderr, "sim: sound: played %s's voucher into %s\n", code.c_str(), path.c_str());
@@ -376,15 +377,13 @@ void kqSoundStop() {
 void simListen(const std::string& wav) {
     std::vector<int16_t> x(16000 * 15);
     x.resize(wav_read(wav.c_str(), x.data(), x.size()));
-    static int16_t buf[FSKV_RX_MIN];
-    static fskv_rx rx;
-    fskv_rx_init(&rx, buf, FSKV_RX_MIN);
+    kqgg::Rx rx;
     uint8_t v[32];
     for (size_t at = 0; at < x.size(); at += 320) {
         if (kqSound().state != KqSound::LISTENING) return;
-        if (!fskv_rx_push(&rx, x.data() + at, std::min<size_t>(320, x.size() - at), v)) continue;
+        if (rx.push(x.data() + at, std::min<size_t>(320, x.size() - at), v, sizeof v) != kqgg::kPayload) continue;
         std::string code = kq1::voucher_code(kq1::Bytes(v, v + 32));
-        fprintf(stderr, "sim: sound: heard %s, RS fixed %d, clock %.4f\n", code.c_str(), rx.st.rs_fixed, rx.st.a);
+        fprintf(stderr, "sim: sound: heard %s at %.2f s\n", code.c_str(), at / 16000.0);
         std::lock_guard<std::mutex> g(g_mu);
         g_sound.state = KqSound::HEARD;
         g_sound.code = code;

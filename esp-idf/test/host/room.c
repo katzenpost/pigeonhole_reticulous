@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-#include "fskv_room.h"
+#include "room.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
-const fskv_chan FSKV_ROOM = {"room", 0.3, 10, 1, 0.3}, FSKV_STRESS = {"stress", 0.6, 0, 1, 0.55},
-                FSKV_DRY = {"dry", 0, 0, 1, 0};
+const room_chan ROOM_TABLE = {"room", 0.3, 10, 1, 0.3}, ROOM_STRESS = {"stress", 0.6, 0, 1, 0.55},
+                ROOM_DRY = {"dry", 0, 0, 1, 0};
 
 static uint64_t rng = 0x9E3779B97F4A7C15ull;
 void room_seed(uint64_t s) { rng = s ? s : 0x9E3779B97F4A7C15ull; }
@@ -56,7 +56,7 @@ static size_t resample(const double* x, size_t nx, double a, double* y) {
 }
 
 // Impulse response: direct path, six early reflections in 1-15 ms, exponential noise tail.
-static size_t make_ir(const fskv_chan* c, int fs, double* h, size_t cap) {
+static size_t make_ir(const room_chan* c, int fs, double* h, size_t cap) {
     size_t L = (size_t)(c->rt60 * fs * 2 / 3);  // to -40 dB
     if (L > cap) L = cap;
     memset(h, 0, L * sizeof *h);
@@ -78,7 +78,7 @@ static size_t make_ir(const fskv_chan* c, int fs, double* h, size_t cap) {
 static double bufA[MAXN], bufB[MAXN], ir[FS];
 static const double kSig = 32768 * 0.0316227766;  // -30 dBFS RMS
 
-size_t room_channel(const int16_t* tx, size_t ntx, size_t lead, size_t tail, const fskv_chan* c, double drift,
+size_t room_channel(const int16_t* tx, size_t ntx, size_t lead, size_t tail, const room_chan* c, double drift,
                     double snr_db, int16_t* rx, size_t cap, double* t0) {
     size_t nx = lead + ntx + tail;
     double a = 1 + drift;
