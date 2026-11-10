@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Vouchers by sound through ggwave (components/kq_ggwave, docs/sound-vouchers.md): a clean
-// loopback and its level, both ways against ggwave at its 48 kHz defaults through its C API, the
-// WAV fixtures, the receiver through a simulated room at several SNRs, noise, and the check code.
+// loopback and its level, the sound against tx.wav sample for sample, the WAV fixtures, the
+// receiver through a simulated room at several SNRs, noise, and the check code. Both ways against
+// ggwave at its 48 kHz defaults is a test of components/kq_rust (cargo test).
 //   test_ggwave <vectors.txt>                                  the checks
 //   test_ggwave <vectors.txt> sweep <n> [room|stress|dry] [drift]   FER tables, n trials a point
 //   test_ggwave <vectors.txt> fixtures <dir>                   writes the WAV fixtures
@@ -13,7 +14,6 @@
 #include <string>
 #include <vector>
 
-#include "ggwave/ggwave.h"
 #include "kq1_engine.h"
 #include "kq_ggwave.h"
 #include "room.h"
@@ -124,16 +124,6 @@ int decodeFile(const char* path) {
     return 0;
 }
 
-// ggwave as another program would run it: its C API and default parameters (48 kHz, 1024-sample
-// frames, float), receiving Audible Fast only.
-ggwave_Instance defaultGgwave() {
-    for (int i = 0; i < GGWAVE_PROTOCOL_COUNT; i++) {
-        ggwave_rxToggleProtocol((ggwave_ProtocolId)i, i == GGWAVE_PROTOCOL_AUDIBLE_FAST);
-        ggwave_txToggleProtocol((ggwave_ProtocolId)i, i == GGWAVE_PROTOCOL_AUDIBLE_FAST);
-    }
-    return ggwave_init(ggwave_getDefaultParameters());
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -180,35 +170,11 @@ int main(int argc, char** argv) {
         printf("clean loopback: heard %+.0f ms from the sound's end\n", (at - 3200.0 - tx.size()) / 16);
     }
 
-    // Both ways against ggwave as another program runs it.
+    // The same sound as tx.wav, which the C++ ggwave (060aec7, patched) made before the Rust.
     {
-        ggwave_Instance gg = defaultGgwave();
-        check(gg >= 0, vec, "ggwave at its defaults");
-        // Ours, heard at 48 kHz in 1024-sample frames.
-        kqgg::Resampler up(3, 1);
-        std::vector<float> x(tx.size() + 16000), y(x.size() * 3 + 2048);
-        for (size_t i = 0; i < tx.size(); i++) x[3200 + i] = tx[i] / 32768.0f;
-        size_t ny = up.run(x.data(), x.size(), y.data());
-        char got[256];
-        int len = 0;
-        for (size_t at = 0; at + 1024 <= ny && len <= 0; at += 1024)
-            len = ggwave_ndecode(gg, y.data() + at, 1024 * sizeof(float), got, sizeof got);
-        check(len == 32 && !memcmp(got, voucher.data(), 32), vec, "ggwave at 48 kHz hears our voucher");
-        // Theirs, at volume 25, heard by ours at 16 kHz.
-        int nb = ggwave_encode(gg, voucher.data(), 32, GGWAVE_PROTOCOL_AUDIBLE_FAST, kqgg::kVolume, nullptr, 1);
-        std::vector<float> w(nb / sizeof(float));
-        ggwave_encode(gg, voucher.data(), 32, GGWAVE_PROTOCOL_AUDIBLE_FAST, kqgg::kVolume, w.data(), 0);
-        kqgg::Resampler down(1, 3);
-        std::vector<float> d(w.size() / 3 + 2);
-        size_t nd = down.run(w.data(), w.size(), d.data());
-        std::vector<int16_t> pcm(nd + 16000);
-        for (size_t i = 0; i < nd; i++) pcm[3200 + i] = (int16_t)lrintf(d[i] * 32767);
-        uint8_t out[32];
-        check(listen(pcm.data(), pcm.size(), out) == 32 && !memcmp(out, voucher.data(), 32), vec,
-              "ours hears ggwave's 48 kHz voucher");
-        printf("ggwave at 48 kHz: %zu samples (%.2f s) for the voucher, ours %.2f s\n", w.size(), w.size() / 48000.0,
-               tx.size() / 16000.0);
-        ggwave_free(gg);
+        size_t n = wav_read("vectors/ggwave/tx.wav", g_rx, kMax);
+        check(n == 3200 + tx.size() + 8000 && !memcmp(g_rx + 3200, tx.data(), tx.size() * 2), vec,
+              "the voucher's sound is tx.wav's, sample for sample");
     }
 
     // The fixtures, made by `fixtures`: the vector's voucher, clean and through the room.

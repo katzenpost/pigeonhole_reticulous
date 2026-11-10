@@ -1,5 +1,5 @@
-# The client's sources, libsodium and CTIDH as host objects, for the host tests and the screen
-# simulator. Included from a directory two below esp-idf/.
+# The client's sources, libsodium and CTIDH as host objects, and the Rust library, for the host
+# tests and the screen simulator. Included from a directory two below esp-idf/.
 ROOT := ../..
 SODIUM := $(ROOT)/components/kq_sodium
 SODIUM_SRC := $(SODIUM)/libsodium/src/libsodium
@@ -26,8 +26,11 @@ CTIDH_DEFS += -DFIAT_P1024_NO_INT128
 endif
 QR := $(ROOT)/components/kq_qrcode
 QR_O := $(B)/qr/qrcodegen.o
+# reticulous-core (components/kq_rust), built by cargo for the host.
+RUST := $(ROOT)/components/kq_rust
+RUST_A := $(B)/rust/release/libreticulous_core.a
 GG := $(ROOT)/components/kq_ggwave
-GG_O := $(B)/gg/ggwave.o $(B)/gg/kq_ggwave.o
+GG_O := $(B)/gg/kq_ggwave.o $(RUST_A)
 KQ_SRC := $(filter-out $(ROOT)/src/kq_service.cpp,$(wildcard $(ROOT)/src/*.cpp))
 KQ_O := $(patsubst $(ROOT)/src/%.cpp,$(B)/kq/%.o,$(KQ_SRC))
 # The voice slice's parts that need no lxst (conditional/lxst/, built on a device only with it).
@@ -42,7 +45,7 @@ endif
 CFLAGS := -O2 -g -DCONFIGURED -DNATIVE_LITTLE_ENDIAN -DHAVE_WEAK_SYMBOLS -D__STDC_LIMIT_MACROS \
 	-D__STDC_CONSTANT_MACROS -I$(SODIUM_SRC)/include -I$(SODIUM_SRC)/include/sodium -w
 CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -fsanitize=address,undefined \
-	-I$(ROOT)/include -I$(ROOT)/conditional/lxst/include -I$(QR) -I$(GG) -I$(GG)/include -I$(SODIUM_SRC)/include -I$(CTIDH)/highctidh $(CTIDH_DEFS) $(MBED_INC)
+	-I$(ROOT)/include -I$(ROOT)/conditional/lxst/include -I$(QR) -I$(GG) -I$(RUST)/include -I$(SODIUM_SRC)/include -I$(CTIDH)/highctidh $(CTIDH_DEFS) $(MBED_INC)
 LDLIBS := $(MBED_LIB) -lmbedcrypto -fsanitize=address,undefined
 
 $(B)/sodium/%.o: $(SODIUM_SRC)/%.c
@@ -66,11 +69,12 @@ $(B)/qr/%.o: $(QR)/%.c $(QR)/qrcodegen.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -std=c99 -I$(QR) -c $< -o $@
 
-# ggwave's own source, then ours.
-$(B)/gg/%.o: $(GG)/src/%.cpp $(GG)/include/ggwave/ggwave.h
-	@mkdir -p $(dir $@)
-	$(CXX) -std=c++17 -O2 -g -fsanitize=address,undefined -I$(GG)/include -w -c $< -o $@
-
-$(B)/gg/%.o: $(GG)/%.cpp $(GG)/kq_ggwave.h $(GG)/include/ggwave/ggwave.h
+$(B)/gg/%.o: $(GG)/%.cpp $(GG)/kq_ggwave.h $(RUST)/include/kq_rust.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -O2 -c $< -o $@
+
+$(RUST_A): $(RUST)/Cargo.toml $(RUST)/Cargo.lock $(wildcard $(RUST)/src/*.rs)
+	CARGO_TARGET_DIR=$(abspath $(B)/rust) cargo build --release --locked --manifest-path $(RUST)/Cargo.toml
+
+# The including Makefile's own first target stays its default.
+.DEFAULT_GOAL :=
