@@ -13,7 +13,13 @@ if(IDF_TARGET STREQUAL "esp32s3")
     set(triple xtensa-esp32s3-none-elf)
     # Xtensa is not in upstream Rust: core and alloc are built from the esp toolchain's rust-src.
     set(cargo_args +esp build --target ${triple} -Zbuild-std=core,alloc)
-    set(lib ${cargo_dir}/${triple}/release/libkq_rust.a)
+    set(lib ${CMAKE_CURRENT_BINARY_DIR}/libkq_rust.a)
+    # The staticlib carries compiler_builtins as one object: the link would take all of it for
+    # __muldf3, and its strong symbols would replace libgcc's and libm's for the C code too.
+    # libgcc has every builtin the crate calls, so the firmware's own are used.
+    set(drop_builtins
+        COMMAND ${CMAKE_COMMAND} -E copy ${cargo_dir}/${triple}/release/libkq_rust.a ${lib}
+        COMMAND sh -c "\"$0\" d \"$1\" $(\"$0\" t \"$1\" | grep ^compiler_builtins)" ${CMAKE_AR} ${lib})
 elseif(IDF_TARGET STREQUAL "linux")
     # shortcut: the host's own architecture only; a cross-built Linux station needs --target.
     set(cargo_args build)
@@ -26,8 +32,9 @@ file(GLOB rust_srcs ${COMPONENT_DIR}/src/*.rs)
 add_custom_command(OUTPUT ${lib}
     COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${cargo_dir}
         ${KQ_CARGO} ${cargo_args} --release --locked --manifest-path ${COMPONENT_DIR}/Cargo.toml
+    ${drop_builtins}
     DEPENDS ${COMPONENT_DIR}/Cargo.toml ${COMPONENT_DIR}/Cargo.lock ${rust_srcs}
-    USES_TERMINAL
+    USES_TERMINAL VERBATIM
     COMMENT "cargo: kq-rust for ${IDF_TARGET}")
 add_custom_target(kq_rust_cargo DEPENDS ${lib})
 # highctidh-rs's `external` leaves CTIDH to the final link: kq_ctidh, linked after the library.
