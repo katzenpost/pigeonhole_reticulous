@@ -12,8 +12,9 @@ crate-type = ["staticlib"]
 
 # Prototype: these pin unmerged branches, by the heads their pull requests were opened at.
 [dependencies]
-# katzenpost/ggwave-rs#5, fm/ggwave-no-std: ggwave 0.2.0, no_std, bit-exact with C ggwave.
-ggwave = { git = "https://github.com/katzenpost/ggwave-rs", rev = "c14c285c634b3cbd493aa5378672d53f1fa6911f", default-features = false }
+# katzenpost/ggwave-rs#5 and #7, fm/ggwave-no-std: ggwave 0.2.0, no_std, bit-exact with C ggwave;
+# extern-libm takes its sin/cos/round from the C library (newlib on the device).
+ggwave = { git = "https://github.com/katzenpost/ggwave-rs", rev = "3e112e1889dadfa4d0a0e679f9bd9eb6717371b8", default-features = false, features = ["extern-libm"] }
 libm = "0.2"
 # Pinned for the swaps that follow (kq1_wire, kq1_voucher, kq_bacap); nothing here calls them yet.
 # katzenpost/pigeonhole_protocols#50, fm/pp-no-std: the sans-io katzenqt1 core.

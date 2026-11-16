@@ -449,7 +449,7 @@ dependencies = [
 [[package]]
 name = "ggwave"
 version = "0.2.0"
-source = "git+https://github.com/katzenpost/ggwave-rs?rev=c14c285c634b3cbd493aa5378672d53f1fa6911f#c14c285c634b3cbd493aa5378672d53f1fa6911f"
+source = "git+https://github.com/katzenpost/ggwave-rs?rev=3e112e1889dadfa4d0a0e679f9bd9eb6717371b8#3e112e1889dadfa4d0a0e679f9bd9eb6717371b8"
 dependencies = [
  "libm",
 ]
