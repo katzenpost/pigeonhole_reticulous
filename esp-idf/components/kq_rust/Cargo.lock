@@ -581,7 +581,6 @@ dependencies = [
  "ggwave",
  "highctidh",
  "hpqc",
- "libm",
  "pigeonhole_protocols",
 ]
 

@@ -11,6 +11,13 @@ use core::slice;
 
 use ggwave::{Decoder, Encoder, Parameters, Protocol};
 
+// The C library's (newlib on the device), as ggwave's extern-libm takes them: one copy in the image.
+unsafe extern "C" {
+    safe fn sin(x: f64) -> f64;
+    safe fn cos(x: f64) -> f64;
+    safe fn rintf(x: f32) -> f32;
+}
+
 const INNER: f32 = 24000.0; // ggwave's rate here: 512-sample frames are its 46.875 Hz bins
 const FRAME: usize = 512;
 const PROTOCOL: Protocol = Protocol::AudibleFast;
@@ -55,8 +62,8 @@ fn lowpass() -> [f32; TAPS] {
     for (k, c) in h.iter_mut().enumerate() {
         let t = k as f64 - mid;
         let w = 2.0 * PI * k as f64 / (TAPS - 1) as f64;
-        let s = if t == 0.0 { 2.0 * fc } else { libm::sin(2.0 * PI * fc * t) / (PI * t) };
-        *c = (s * (0.42 - 0.5 * libm::cos(w) + 0.08 * libm::cos(2.0 * w))) as f32;
+        let s = if t == 0.0 { 2.0 * fc } else { sin(2.0 * PI * fc * t) / (PI * t) };
+        *c = (s * (0.42 - 0.5 * cos(w) + 0.08 * cos(2.0 * w))) as f32;
         sum += *c as f64;
     }
     for c in &mut h {
@@ -124,7 +131,7 @@ pub fn encode(p: &[u8], volume: c_int) -> Option<Vec<i16>> {
             *v = w.get(at + i).map_or(0.0, |&s| (32768.0 * s) as i32 as i16 as f32 / 32768.0);
         }
         let ny = down.run(&x[..b], &mut y);
-        out.extend(y[..ny].iter().map(|&s| libm::rintf((s * 32768.0).clamp(-32768.0, 32767.0)) as i16));
+        out.extend(y[..ny].iter().map(|&s| rintf((s * 32768.0).clamp(-32768.0, 32767.0)) as i16));
     }
     Some(out)
 }
@@ -278,7 +285,7 @@ mod tests {
         let mut down = Resampler::new(1, 3);
         let mut d = alloc::vec![0f32; w.len() / 3 + 2];
         let nd = down.run(&w, &mut d);
-        let pcm: Vec<i16> = d[..nd].iter().map(|&s| libm::rintf(s * 32767.0) as i16).collect();
+        let pcm: Vec<i16> = d[..nd].iter().map(|&s| rintf(s * 32767.0) as i16).collect();
         assert_eq!(listen(&padded(&pcm)).as_deref(), Some(&VOUCHER[..]), "ours hears ggwave's 48 kHz voucher");
     }
 
