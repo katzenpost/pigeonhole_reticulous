@@ -186,8 +186,9 @@ unsafe fn input<'a, T>(p: *const T, n: usize) -> &'a [T] {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kq_gg_encode(p: *const u8, n: usize, volume: c_int, len: *mut usize) -> *mut i16 {
+    let Some(len) = (unsafe { len.as_mut() }) else { return core::ptr::null_mut() };
     let w = encode(unsafe { input(p, n) }, volume).unwrap_or_default().into_boxed_slice();
-    unsafe { *len = w.len() };
+    *len = w.len();
     if w.is_empty() { core::ptr::null_mut() } else { Box::into_raw(w) as *mut i16 }
 }
 
@@ -243,8 +244,11 @@ pub unsafe extern "C" fn kq_gg_resampler_free(r: *mut Resampler) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kq_gg_resampler_run(r: *mut Resampler, x: *const f32, n: usize, y: *mut f32) -> usize {
     let Some(r) = (unsafe { r.as_mut() }) else { return 0 };
-    let cap = n * r.up as usize / r.down as usize + 1;
-    r.run(unsafe { input(x, n) }, unsafe { slice::from_raw_parts_mut(y, cap) })
+    let Some(cap) = n.checked_mul(r.up as usize).map(|m| m / r.down as usize + 1) else { return 0 };
+    if x.is_null() || y.is_null() || n == 0 {
+        return 0;
+    }
+    r.run(unsafe { slice::from_raw_parts(x, n) }, unsafe { slice::from_raw_parts_mut(y, cap) })
 }
 
 #[cfg(test)]
@@ -287,6 +291,19 @@ mod tests {
         let nd = down.run(&w, &mut d);
         let pcm: Vec<i16> = d[..nd].iter().map(|&s| rintf(s * 32767.0) as i16).collect();
         assert_eq!(listen(&padded(&pcm)).as_deref(), Some(&VOUCHER[..]), "ours hears ggwave's 48 kHz voucher");
+    }
+
+    #[test]
+    fn c_abi_refuses_nulls() {
+        unsafe {
+            assert!(kq_gg_encode(VOUCHER.as_ptr(), 32, 25, core::ptr::null_mut()).is_null());
+            let r = kq_gg_resampler_new(3, 1);
+            let (x, mut y) = ([0.5f32; 4], [0f32; 13]);
+            assert_eq!(kq_gg_resampler_run(r, x.as_ptr(), 4, core::ptr::null_mut()), 0);
+            assert_eq!(kq_gg_resampler_run(r, core::ptr::null(), 4, y.as_mut_ptr()), 0);
+            assert_eq!(kq_gg_resampler_run(r, x.as_ptr(), usize::MAX, y.as_mut_ptr()), 0);
+            kq_gg_resampler_free(r);
+        }
     }
 
     #[test]

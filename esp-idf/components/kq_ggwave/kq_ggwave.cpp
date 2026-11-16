@@ -10,9 +10,11 @@ std::vector<int16_t> encode(const uint8_t* p, size_t n, int volume) {
     size_t len = 0;
     int16_t* w = kq_gg_encode(p, n, volume, &len);
     std::vector<int16_t> out;
-    try {
-        out.assign(w, w + len);
-    } catch (const std::bad_alloc&) {
+    if (w && len) {
+        try {
+            out.assign(w, w + len);
+        } catch (const std::bad_alloc&) {
+        }
     }
     kq_gg_free(w, len);
     return out;
