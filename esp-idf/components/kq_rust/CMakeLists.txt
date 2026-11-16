@@ -1,4 +1,4 @@
-# reticulous-core (Cargo.toml here), the firmware's one Rust library: no_std, built by cargo and
+# kq-rust (Cargo.toml here), the firmware's one Rust library: no_std, built by cargo and
 # linked as a static library, for the ESP32-S3 (xtensa-esp32s3-none-elf, with espup's esp
 # toolchain) or for the host (the linux target). README.md has the toolchains.
 idf_component_register(INCLUDE_DIRS include REQUIRES kq_ctidh)
@@ -13,11 +13,11 @@ if(IDF_TARGET STREQUAL "esp32s3")
     set(triple xtensa-esp32s3-none-elf)
     # Xtensa is not in upstream Rust: core and alloc are built from the esp toolchain's rust-src.
     set(cargo_args +esp build --target ${triple} -Zbuild-std=core,alloc)
-    set(lib ${cargo_dir}/${triple}/release/libreticulous_core.a)
+    set(lib ${cargo_dir}/${triple}/release/libkq_rust.a)
 elseif(IDF_TARGET STREQUAL "linux")
     # shortcut: the host's own architecture only; a cross-built Linux station needs --target.
     set(cargo_args build)
-    set(lib ${cargo_dir}/release/libreticulous_core.a)
+    set(lib ${cargo_dir}/release/libkq_rust.a)
 else()
     message(FATAL_ERROR "kq_rust: no Rust target for ${IDF_TARGET}")
 endif()
@@ -28,9 +28,9 @@ add_custom_command(OUTPUT ${lib}
         ${KQ_CARGO} ${cargo_args} --release --locked --manifest-path ${COMPONENT_DIR}/Cargo.toml
     DEPENDS ${COMPONENT_DIR}/Cargo.toml ${COMPONENT_DIR}/Cargo.lock ${rust_srcs}
     USES_TERMINAL
-    COMMENT "cargo: reticulous-core for ${IDF_TARGET}")
+    COMMENT "cargo: kq-rust for ${IDF_TARGET}")
 add_custom_target(kq_rust_cargo DEPENDS ${lib})
 # highctidh-rs's `external` leaves CTIDH to the final link: kq_ctidh, linked after the library.
-add_prebuilt_library(reticulous_core ${lib} REQUIRES kq_ctidh)
-add_dependencies(reticulous_core kq_rust_cargo)
-target_link_libraries(${COMPONENT_LIB} INTERFACE reticulous_core)
+add_prebuilt_library(kq_rust_lib ${lib} REQUIRES kq_ctidh)
+add_dependencies(kq_rust_lib kq_rust_cargo)
+target_link_libraries(${COMPONENT_LIB} INTERFACE kq_rust_lib)

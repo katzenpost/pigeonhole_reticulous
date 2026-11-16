@@ -26,9 +26,9 @@ CTIDH_DEFS += -DFIAT_P1024_NO_INT128
 endif
 QR := $(ROOT)/components/kq_qrcode
 QR_O := $(B)/qr/qrcodegen.o
-# reticulous-core (components/kq_rust), built by cargo for the host.
+# kq-rust (components/kq_rust), built by cargo for the host.
 RUST := $(ROOT)/components/kq_rust
-RUST_A := $(B)/rust/release/libreticulous_core.a
+RUST_A := $(B)/rust/release/libkq_rust.a
 GG := $(ROOT)/components/kq_ggwave
 GG_O := $(B)/gg/kq_ggwave.o $(RUST_A)
 KQ_SRC := $(filter-out $(ROOT)/src/kq_service.cpp,$(wildcard $(ROOT)/src/*.cpp))

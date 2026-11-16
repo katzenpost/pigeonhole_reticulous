@@ -1,6 +1,6 @@
 # kq_rust
 
-`reticulous-core`, the Rust half of Group Chat and Radio: one `#![no_std]` static library, with
+`kq-rust`, the Rust half of Group Chat and Radio: one `#![no_std]` static library, with
 `panic = "abort"` and an allocator over ESP-IDF's `heap_caps_malloc`/`heap_caps_free` (PSRAM first,
 then internal RAM). The C/C++ shell calls it through `include/kq_rust.h`, and the same code builds
 for the host tests and the screen simulator.

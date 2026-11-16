@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! reticulous-core: the Rust half of the T-Deck apps, one static library behind the C ABI in
+//! kq-rust: the Rust half of the T-Deck apps, one static library behind the C ABI in
 //! include/kq_rust.h. The same code builds for the ESP32-S3 and for the host tests.
 #![cfg_attr(not(test), no_std)]
 

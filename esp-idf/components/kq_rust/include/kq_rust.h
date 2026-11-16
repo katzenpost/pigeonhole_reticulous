@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// The C ABI of reticulous-core (components/kq_rust), the firmware's one Rust library.
+// The C ABI of kq-rust (components/kq_rust), the firmware's one Rust library.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
