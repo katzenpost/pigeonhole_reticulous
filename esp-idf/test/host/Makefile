@@ -6,6 +6,7 @@ TESTS := test_bacap test_nike test_wire test_kq1 test_voucher test_replica test_
 
 all: $(addprefix $(B)/,$(TESTS)) $(B)/vectors.txt
 	@for t in $(TESTS); do $(B)/$$t $(B)/vectors.txt || exit 1; done
+	CARGO_TARGET_DIR=$(abspath $(B)/rust) cargo test --release --locked --manifest-path $(RUST)/Cargo.toml
 
 $(B)/vectors.txt: gen_vectors.py $(shell find vectors -name '*.json')
 	@mkdir -p $(B)
