@@ -10,15 +10,15 @@ publish = false
 [lib]
 crate-type = ["staticlib"]
 
-# Prototype: these pin unmerged branches, by the heads their pull requests were opened at.
+# Pinned by git rev; each rev is on its repo's main.
 [dependencies]
-# katzenpost/ggwave-rs#5 and #7, fm/ggwave-no-std: ggwave 0.2.0, no_std, bit-exact with C ggwave;
+# katzenpost/ggwave-rs#5 and #7: ggwave 0.2.0, no_std, bit-exact with C ggwave;
 # extern-libm takes its sin/cos/round from the C library (newlib on the device).
 ggwave = { git = "https://github.com/katzenpost/ggwave-rs", rev = "3e112e1889dadfa4d0a0e679f9bd9eb6717371b8", default-features = false, features = ["extern-libm"] }
-# Pinned for the swaps that follow (kq1_wire, kq1_voucher, kq_bacap); nothing here calls them yet.
-# katzenpost/pigeonhole_protocols#50, fm/pp-no-std: the sans-io katzenqt1 core.
+# Pinned for kq1_voucher and kq_bacap, which move here later; nothing here calls them yet.
+# katzenpost/pigeonhole_protocols#50: the sans-io katzenqt1 core.
 pigeonhole_protocols = { git = "https://github.com/katzenpost/pigeonhole_protocols", rev = "a8b5bb74ac0243eb497e2c6a7734db08cd86ac4f", default-features = false }
-# katzenpost/hpqc#159, fm/hpqc-no-std: BACAP and the voucher.
+# katzenpost/hpqc#159: BACAP and the voucher.
 hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "2886a0f447e2430baaa0fdfaf21376150d415a7f", default-features = false, features = ["voucher"] }
 # katzenpost/highctidh-rs#2: the rev hpqc pins. `external` compiles no C: CTIDH comes from the
 # final link, which is the firmware's components/kq_ctidh (the host tests' CTIDH objects).

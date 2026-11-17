@@ -10,10 +10,9 @@ So far it holds:
 - `src/ggwave.rs`: voucher codes by sound (`docs/sound-vouchers.md`), over the
   [ggwave crate](https://github.com/katzenpost/ggwave-rs). `components/kq_ggwave` is its C++ face.
 
-`Cargo.toml` pins the hushphone crates by git rev. They are unmerged branches for now:
-pigeonhole_protocols `fm/pp-no-std`, hpqc `fm/hpqc-no-std`, highctidh-rs (the rev hpqc pins) and
-ggwave-rs `fm/ggwave-no-std`. highctidh-rs is built with `external`, so it compiles no C, and the
-firmware's link takes CTIDH from `components/kq_ctidh`.
+`Cargo.toml` pins the hushphone crates by git rev, each on its repo's main: ggwave-rs,
+pigeonhole_protocols, hpqc and highctidh-rs (the rev hpqc pins). highctidh-rs is built with
+`external`, so it compiles no C, and the firmware's link takes CTIDH from `components/kq_ctidh`.
 
 ## Toolchains
 
