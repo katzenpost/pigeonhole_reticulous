@@ -79,6 +79,7 @@ jobs:
         image:
           - { name: tdeck, with: '' }
           - { name: tdeck-voice, with: '--with reticulous/lxst' }
+          - { name: baseline-tmp, with: '--without pigeonhole_reticulous' }
     steps:
       # Into a spangap workspace as the straddle, so the build clones the other straddles
       # beside it; a detached checkout is never pulled, so the build uses this commit.
@@ -127,6 +128,14 @@ jobs:
           spangap init "$GITHUB_WORKSPACE/ws"
           spangap build reticulous/reticulous --with spangap/hw-lilygo-tdeck \
             --with katzenpost/pigeonhole_reticulous ${{ matrix.image.with }}
+
+      # What the image holds, by archive, so a build over its slot shows what grew.
+      - name: Size by archive
+        if: always()
+        working-directory: ws
+        run: |
+          spangap docker bash -c 'cd reticulous/esp-idf && . "$IDF_PATH/export.sh" >/dev/null 2>&1 &&
+            python -m esp_idf_size --archives build.esp32s3/reticulous.map | head -60'
 
   # The ESP32-S3 test apps in Espressif's QEMU: the field's instruction counts (test/qemu,
   # checked bit for bit against fiat), kq_ctidh's field check, and the voucher's crypto
