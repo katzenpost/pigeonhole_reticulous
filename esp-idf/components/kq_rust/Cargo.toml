@@ -1,0 +1,35 @@
+[package]
+name = "kq-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "AGPL-3.0-only"
+description = "The Rust half of pigeonhole_reticulous: one no_std static library behind a C ABI (include/kq_rust.h)"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+# Pinned by git rev; each rev is on its repo's main.
+[dependencies]
+# katzenpost/ggwave-rs#5 and #7: ggwave 0.2.0, no_std, bit-exact with C ggwave;
+# extern-libm takes its sin/cos/round from the C library (newlib on the device).
+ggwave = { git = "https://github.com/katzenpost/ggwave-rs", rev = "3e112e1889dadfa4d0a0e679f9bd9eb6717371b8", default-features = false, features = ["extern-libm"] }
+# Pinned for kq1_voucher and kq_bacap, which move here later; nothing here calls them yet.
+# katzenpost/pigeonhole_protocols#50: the sans-io katzenqt1 core.
+pigeonhole_protocols = { git = "https://github.com/katzenpost/pigeonhole_protocols", rev = "a8b5bb74ac0243eb497e2c6a7734db08cd86ac4f", default-features = false }
+# katzenpost/hpqc#159: BACAP and the voucher.
+hpqc = { git = "https://github.com/katzenpost/hpqc", rev = "2886a0f447e2430baaa0fdfaf21376150d415a7f", default-features = false, features = ["voucher"] }
+# katzenpost/highctidh-rs#2: the rev hpqc pins. `external` compiles no C: CTIDH comes from the
+# final link, which is the firmware's components/kq_ctidh (the host tests' CTIDH objects).
+highctidh = { git = "https://github.com/katzenpost/highctidh-rs", rev = "9586ee91ecac406f16b54b05c4fbd406b291de79", default-features = false, features = ["external"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+# The firmware's -Os.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

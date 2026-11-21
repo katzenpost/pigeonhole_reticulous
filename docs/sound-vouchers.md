@@ -31,28 +31,33 @@ What that comes to:
 
 ## On the T-Deck
 
-The audio engine runs at 16 kHz. `components/kq_ggwave` runs ggwave at 24 kHz with 512-sample
-frames and resamples 16 <-> 24 kHz itself, through a 144-tap low-pass at 48 kHz: ggwave's own
-resampler works in double precision, which the ESP32-S3 does in software. The level is
-`s.kq.sound_volume` (25 unless set).
+The audio engine runs at 16 kHz. ggwave there is the Rust
+[ggwave crate](https://github.com/katzenpost/ggwave-rs) 0.2.0, a port of `060aec7` whose samples
+match C ggwave's, in `components/kq_rust` (`src/ggwave.rs`); `components/kq_ggwave` is its C++
+face. It runs ggwave at 24 kHz with 512-sample frames and resamples 16 <-> 24 kHz itself, through a
+144-tap low-pass at 48 kHz: ggwave's own resampler works in double precision, which the ESP32-S3
+does in software. The level is `s.kq.sound_volume` (25 unless set).
 
-The copy of ggwave there differs from upstream only where it is marked `kq`:
+What it holds in PSRAM, only during a transfer:
 
-- `kMaxRecordedFrames` is 448, not 2048. That takes ggwave's own memory from 4.2 MB to 0.94 MB
-  for the receiver, and from 4.6 MB to 1.3 MB for the sender (16-bit output), all PSRAM.
-- The receiver records at most that many frames.
-- The sender refuses a message longer than that.
-- `prepare()` fails when its allocation does.
+- **Listening: 4.2 MB.** The crate records up to 2048 frames, and takes that memory when it hears
+  a start marker. Listening does not start unless that much is free. (The patched C++ copy this
+  replaced recorded 448 frames, 0.94 MB.)
+- **Sending: 0.46 MB** while a voucher is encoded: the sound at 24 kHz and ggwave's tones, then
+  the 16 kHz copy. Sending does not start unless 1.25 MB is free, what the longest message takes.
+  (The patched C++ copy took 1.3 MB.)
 
-None of this changes what goes over the air, and 448 frames hold the longest Audible Fast message
-(140 bytes, 434 frames).
+None of this changes what goes over the air: a voucher's sound is `tx.wav`'s, which the C++ copy
+made, sample for sample. The end marker ends a recording, so a message never needs the extra frames.
 
 ## How well it works, simulated
 
 `esp-idf/test/host/test_ggwave` checks:
 
-- Both directions against ggwave at its 48 kHz defaults, through its C API.
+- A voucher's sound against `vectors/ggwave/tx.wav`, sample for sample.
 - The fixtures in `vectors/ggwave`.
+- Both directions against ggwave at its 48 kHz defaults: the ggwave crate at its defaults, in
+  `components/kq_rust`'s `cargo test`.
 - Vouchers through a simulated room: a small speaker's and a MEMS mic's band, reverb, noise and
   clock drift.
 
