@@ -69,17 +69,10 @@ jobs:
 
   # The T-Deck image, built as `spangap build` builds it, with this checkout as the
   # pigeonhole_reticulous straddle; ESP-IDF's check_sizes and spangap's firmware ceiling fail
-  # the build when the app outgrows its slot. voice adds lxst, which compiles conditional/lxst.
+  # the build when the app outgrows its slot.
   firmware:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        image:
-          - { name: tdeck, with: '' }
-          - { name: tdeck-voice, with: '--with reticulous/lxst' }
-          - { name: baseline-tmp, with: '--without pigeonhole_reticulous' }
     steps:
       # Into a spangap workspace as the straddle, so the build clones the other straddles
       # beside it; a detached checkout is never pulled, so the build uses this commit.
@@ -127,7 +120,7 @@ jobs:
         run: |
           spangap init "$GITHUB_WORKSPACE/ws"
           spangap build reticulous/reticulous --with spangap/hw-lilygo-tdeck \
-            --with katzenpost/pigeonhole_reticulous ${{ matrix.image.with }}
+            --with katzenpost/pigeonhole_reticulous
 
       # What the image holds, by archive, so a build over its slot shows what grew.
       - name: Size by archive
