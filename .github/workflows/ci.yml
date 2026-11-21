@@ -1,0 +1,187 @@
+# The checks on every pull request and push to main: the host tests, the T-Deck firmware as
+# spangap builds it, and the ESP32-S3 test apps in Espressif's QEMU.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MBEDTLS_VERSION: 3.6.7
+  MBEDTLS_SHA256: a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
+  IDF_IMAGE: docker.io/espressif/idf:v5.5.4
+
+jobs:
+  # test/host: the client's tests against hpqc's vectors, and cargo test for kq_rust.
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: mbedTLS from the cache
+        id: mbedtls
+        uses: actions/cache@v4
+        with:
+          path: ~/mbedtls
+          key: mbedtls-${{ env.MBEDTLS_VERSION }}-${{ runner.os }}
+
+      - name: mbedTLS, built when not cached
+        if: steps.mbedtls.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/src && cd ~/src
+          curl -sSfL -o mbedtls.tar.bz2 "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$MBEDTLS_VERSION/mbedtls-$MBEDTLS_VERSION.tar.bz2"
+          echo "$MBEDTLS_SHA256  mbedtls.tar.bz2" | sha256sum -c -
+          tar xjf mbedtls.tar.bz2
+          cmake -S "mbedtls-$MBEDTLS_VERSION" -B build -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/mbedtls" -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build build -j"$(nproc)"
+          cmake --install build
+
+      # test_qr reads the voucher's QR code back with zbarimg.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zbar-tools
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-host-${{ hashFiles('esp-idf/components/kq_rust/Cargo.lock') }}
+
+      # test_member's and test_client's scenarios, from pigeonhole_protocols at the rev kq_rust pins.
+      - name: pigeonhole_protocols' testdata
+        run: |
+          rev=$(sed -n 's/^pigeonhole_protocols = .*rev = "\([0-9a-f]*\)".*/\1/p' esp-idf/components/kq_rust/Cargo.toml)
+          git init -q "$RUNNER_TEMP/pp"
+          git -C "$RUNNER_TEMP/pp" fetch -q --depth 1 https://github.com/katzenpost/pigeonhole_protocols "$rev"
+          git -C "$RUNNER_TEMP/pp" checkout -q FETCH_HEAD
+          echo "KQ1_TESTDATA=$RUNNER_TEMP/pp/testdata/katzenqt1" >> "$GITHUB_ENV"
+
+      - run: make -C esp-idf/test/host -j"$(nproc)" MBEDTLS_DIR="$HOME/mbedtls"
+
+  # The T-Deck image, built as `spangap build` builds it, with this checkout as the
+  # pigeonhole_reticulous straddle; ESP-IDF's check_sizes and spangap's firmware ceiling fail
+  # the build when the app outgrows its slot.
+  firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      # Into a spangap workspace as the straddle, so the build clones the other straddles
+      # beside it; a detached checkout is never pulled, so the build uses this commit.
+      - uses: actions/checkout@v4
+        with:
+          path: ws/pigeonhole_reticulous
+
+      - name: spangap
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://raw.githubusercontent.com/spangap/spangap/refs/heads/main/spangap -o "$HOME/.local/bin/spangap"
+          chmod +x "$HOME/.local/bin/spangap"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The build container's home is ~/.spangap, where kq_rust's CMake finds cargo
+      # (components/kq_rust/README.md): rustup, and espup's esp toolchain for Xtensa.
+      - name: Rust from the cache
+        id: rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.spangap/.cargo
+            ~/.spangap/.rustup
+          key: esp-rust-${{ runner.os }}-${{ hashFiles('ws/pigeonhole_reticulous/esp-idf/components/kq_rust/Cargo.lock') }}
+          restore-keys: esp-rust-${{ runner.os }}-
+
+      - name: Rust and espup, installed when not cached
+        if: steps.rust.outputs.cache-hit != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          export CARGO_HOME="$HOME/.spangap/.cargo" RUSTUP_HOME="$HOME/.spangap/.rustup"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+            curl -fsSL -o "$CARGO_HOME/bin/espup" https://github.com/esp-rs/espup/releases/latest/download/espup-x86_64-unknown-linux-gnu
+            chmod +x "$CARGO_HOME/bin/espup"
+            espup install --targets esp32s3 --export-file "$RUNNER_TEMP/export-esp.sh"
+          fi
+          # Fetch kq_rust's crates now, so the container needs no network for them.
+          cargo +esp fetch --locked --manifest-path ws/pigeonhole_reticulous/esp-idf/components/kq_rust/Cargo.toml
+
+      - name: Build
+        working-directory: ws
+        run: |
+          spangap init "$GITHUB_WORKSPACE/ws"
+          spangap build reticulous/reticulous --with spangap/hw-lilygo-tdeck \
+            --with katzenpost/pigeonhole_reticulous
+
+      # What the image holds, by archive, so a build over its slot shows what grew.
+      - name: Size by archive
+        if: always()
+        working-directory: ws
+        run: |
+          spangap docker bash -c 'cd reticulous/esp-idf && . "$IDF_PATH/export.sh" >/dev/null 2>&1 &&
+            python -m esp_idf_size --archives build.esp32s3/reticulous.map | head -60'
+
+  # The ESP32-S3 test apps in Espressif's QEMU: the field's instruction counts (test/qemu,
+  # checked bit for bit against fiat), kq_ctidh's field check, and the voucher's crypto
+  # (test/qemu-voucher, about 40 minutes).
+  qemu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      IDF_TOOLS_PATH: /home/runner/.espressif
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: QEMU from the cache
+        id: qemu
+        uses: actions/cache@v4
+        with:
+          path: ~/.espressif
+          key: qemu-xtensa-${{ env.IDF_IMAGE }}
+
+      - name: QEMU, ESP-IDF's qemu-xtensa, installed when not cached
+        if: steps.qemu.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$IDF_TOOLS_PATH"
+          # The image's entrypoint needs its own IDF_TOOLS_PATH; only the install gets /out.
+          podman run --rm -v "$IDF_TOOLS_PATH":/out "$IDF_IMAGE" \
+            bash -c 'IDF_TOOLS_PATH=/out python3 "$IDF_PATH/tools/idf_tools.py" install qemu-xtensa'
+
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsdl2-2.0-0 libslirp0 libpixman-1-0
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-qemu-${{ github.run_id }}
+          restore-keys: ccache-qemu-
+
+      - name: test/qemu, the field's instruction counts
+        run: make -C esp-idf/test/qemu IDF_IMAGE="$IDF_IMAGE" run
+
+      - name: kq_ctidh/test_apps/field
+        run: |
+          B=build
+          D=esp-idf/components/kq_ctidh/test_apps/field
+          podman run --rm -v "$PWD/esp-idf":/w -w /w/components/kq_ctidh/test_apps/field "$IDF_IMAGE" bash -c "\
+            set -e; idf.py -B $B -DSDKCONFIG=$B/sdkconfig build; \
+            cd $B && esptool.py --chip esp32s3 merge_bin --fill-flash-size 2MB -o flash.bin @flash_args"
+          QEMU=$(echo "$IDF_TOOLS_PATH"/tools/qemu-xtensa/*/qemu/bin/qemu-system-xtensa)
+          # The app returns after its verdict and QEMU idles on, so it is stopped at the verdict.
+          "$QEMU" -nographic -machine esp32s3 -accel tcg,one-insn-per-tb=on \
+            -drive file=$D/$B/flash.bin,if=mtd,format=raw </dev/null >field.out 2>&1 &
+          timeout 1800 bash -c 'until grep -q "^field: \(PASS\|FAIL\)" field.out; do sleep 5; done' || true
+          kill $! || true
+          cat field.out
+          grep -q '^field: PASS' field.out
+
+      - name: test/qemu-voucher, the voucher's crypto
+        run: make -C esp-idf/test/qemu-voucher IDF_IMAGE="$IDF_IMAGE" run
