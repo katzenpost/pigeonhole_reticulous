@@ -56,6 +56,15 @@ jobs:
             ~/.cargo/git
           key: cargo-host-${{ hashFiles('esp-idf/components/kq_rust/Cargo.lock') }}
 
+      # test_member's and test_client's scenarios, from pigeonhole_protocols at the rev kq_rust pins.
+      - name: pigeonhole_protocols' testdata
+        run: |
+          rev=$(sed -n 's/^pigeonhole_protocols = .*rev = "\([0-9a-f]*\)".*/\1/p' esp-idf/components/kq_rust/Cargo.toml)
+          git init -q "$RUNNER_TEMP/pp"
+          git -C "$RUNNER_TEMP/pp" fetch -q --depth 1 https://github.com/katzenpost/pigeonhole_protocols "$rev"
+          git -C "$RUNNER_TEMP/pp" checkout -q FETCH_HEAD
+          echo "KQ1_TESTDATA=$RUNNER_TEMP/pp/testdata/katzenqt1" >> "$GITHUB_ENV"
+
       - run: make -C esp-idf/test/host -j"$(nproc)" MBEDTLS_DIR="$HOME/mbedtls"
 
   # The T-Deck image, built as `spangap build` builds it, with this checkout as the
